@@ -1261,17 +1261,23 @@ var Engine = (function () {
   var AWARDS = [['first', 3, 'Player of the week', 'Player of the week · 3 points'], ['second', 2, 'Second best', 'Second best · 2 points'], ['third', 1, 'Third best', 'Third best · 1 point']];
   function mvpStats() {
     var S = {}, games = teamGames().filter(function (g) { return g.status === 'done'; });
-    function row(id) { return S[id] || (S[id] = { pts: 0, first: 0, second: 0, third: 0, assists: 0 }); }
+    function row(id) { return S[id] || (S[id] = { pts: 0, first: 0, second: 0, third: 0, assists: 0, team: 0 }); }
+    var teamPts = 0;
     games.forEach(function (g) {
       if (!g.awards) return;
+      if (g.awards.team) {
+        teamPts++;
+        Object.keys(Engine.derive(g, g.finalTau).P).forEach(function (id) { var r = row(id); r.pts += 1; r.team++; });
+      }
       AWARDS.forEach(function (a) {
         var w = g.awards[a[0]]; if (!w) return;
         if (w.p) { var r = row(w.p); r.pts += a[1]; r[a[0]]++; }
         if (w.a) { var q = row(w.a); q.pts += 1; q.assists++; }
       });
     });
-    return { S: S, games: games };
+    return { S: S, games: games, teamPts: teamPts };
   }
+  function awardsSet(g) { return !!(g.awards && (g.awards.team || (g.awards.first && g.awards.first.p) || (g.awards.second && g.awards.second.p) || (g.awards.third && g.awards.third.p))); }
   function awardSummary(g) {
     if (!g.awards || !g.awards.first || !g.awards.first.p) return '';
     return 'Player of the week: ' + pl(g.awards.first.p).name;
@@ -1280,14 +1286,14 @@ var Engine = (function () {
     var M = mvpStats(), h = '<div class="stack">';
     var rows = Object.keys(M.S).map(function (id) { return { id: id, s: M.S[id] }; });
     rows.sort(function (a, b) { return b.s.pts - a.s.pts || b.s.first - a.s.first || b.s.second - a.s.second || b.s.third - a.s.third || b.s.assists - a.s.assists; });
-    h += '<div class="card"><b>MVP table</b><br><span class="small muted">Best player 3 points, second 2, third 1, plus 1 point for each assist. Set the awards when you end a game, or from a game below.</span></div>';
+    h += '<div class="card"><b>MVP table</b><br><span class="small muted">Best player 3 points, second 2, third 1, plus 1 point for each assist. You can also give the whole team 1 point for a good game. Set the awards when you end a game, or from a game below.</span></div>';
     if (!rows.length) return h + '<div class="card muted">No awards yet. When you end a game you can pick the top three players and any assists.</div>' + gamesAwardsList(M) + '</div>';
     var mx = Math.max.apply(null, rows.map(function (r) { return r.s.pts; }).concat([1]));
     var rank = 0, lastKey = null;
     h += '<div class="card flat" style="padding-block:4px">' + rows.map(function (r, i) {
-      var key = r.s.pts + '/' + r.s.first + '/' + r.s.second + '/' + r.s.third + '/' + r.s.assists; if (key !== lastKey) { rank = i + 1; lastKey = key; }
+      var key = r.s.pts + '/' + r.s.first + '/' + r.s.second + '/' + r.s.third + '/' + r.s.assists + '/' + r.s.team; if (key !== lastKey) { rank = i + 1; lastKey = key; }
       var p = pl(r.id);
-      return '<div class="srow"><span class="num">' + rank + '</span><span><b>#' + esc(p.num) + ' ' + esc(p.name) + '</b><br><span class="small muted">1st ×' + r.s.first + ' · 2nd ×' + r.s.second + ' · 3rd ×' + r.s.third + ' · Assists ×' + r.s.assists + '</span>' +
+      return '<div class="srow"><span class="num">' + rank + '</span><span><b>#' + esc(p.num) + ' ' + esc(p.name) + '</b><br><span class="small muted">1st ×' + r.s.first + ' · 2nd ×' + r.s.second + ' · 3rd ×' + r.s.third + ' · Assists ×' + r.s.assists + (M.teamPts ? ' · Team ×' + r.s.team : '') + '</span>' +
         '<div class="bars"><s style="width:' + Math.round(r.s.pts / mx * 100) + '%"></s></div></span><span class="r">' + r.s.pts + '<small class="muted">' + (r.s.pts === 1 ? 'point' : 'points') + '</small></span></div>';
     }).join('') + '</div>';
     return h + gamesAwardsList(M) + '</div>';
@@ -1296,29 +1302,54 @@ var Engine = (function () {
     if (!M.games.length) return '';
     return '<div class="sec-title"><span>Week by week</span></div><div class="card flat list">' + M.games.slice().reverse().map(function (g) {
       var aw = g.awards, line;
-      if (!aw || !aw.first || !aw.first.p) line = '<span class="small" style="color:var(--accent)">Awards not set. Tap to add.</span>';
+      if (!awardsSet(g)) line = '<span class="small" style="color:var(--accent)">Awards not set. Tap to add.</span>';
       else {
         var parts = [], assists = [];
         AWARDS.forEach(function (a, i) { var w = aw[a[0]]; if (w && w.p) parts.push((i + 1) + '. ' + esc(pl(w.p).name)); if (w && w.a) assists.push(esc(pl(w.a).name)); });
-        line = '<span class="small muted">' + parts.join(' · ') + (assists.length ? '<br>Assists: ' + assists.join(', ') : '') + '</span>';
+        line = '<span class="small muted">' + parts.join(' · ') + (assists.length ? '<br>Assists: ' + assists.join(', ') : '') + (aw.team ? '<br>Whole team +1 point' : '') + '</span>';
       }
       return '<button class="srow" style="grid-template-columns:1fr auto" data-act="awards" data-id="' + g.id + '"><span><b>' + esc(g.opp ? 'vs ' + g.opp : 'Game') + '</b> <span class="small muted">' + esc(g.date) + '</span><br>' + line + '</span><span class="muted">›</span></button>';
     }).join('') + '</div>';
   }
   function openAwards(gid) {
     var g = DB.games.filter(function (x) { return x.id === gid; })[0]; if (!g) return;
-    var P = Engine.derive(g, g.finalTau).P, ids = Object.keys(P).sort(function (a, b) { return (parseInt(pl(a).num, 10) || 0) - (parseInt(pl(b).num, 10) || 0); });
+    var P = Engine.derive(g, g.finalTau).P;
+    UI.awardIds = Object.keys(P).sort(function (a, b) { return (parseInt(pl(a).num, 10) || 0) - (parseInt(pl(b).num, 10) || 0); });
     var aw = g.awards || {};
-    function sel(id, val, blank) {
-      return '<select id="' + id + '"><option value="">' + blank + '</option>' + ids.map(function (i) { return '<option value="' + i + '"' + (i === val ? ' selected' : '') + '>#' + esc(pl(i).num) + ' ' + esc(pl(i).name) + '</option>'; }).join('') + '</select>';
-    }
-    var h = '<h2>Game awards</h2><div class="muted">' + esc(g.opp ? 'vs ' + g.opp : 'Game') + ' · ' + esc(g.date) + '. Pick the top three, and who gets an assist point for each.</div>';
+    UI.awardTeam = !!aw.team;
+    var h = '<h2>Game awards</h2><div class="muted">' + esc(g.opp ? 'vs ' + g.opp : 'Game') + ' · ' + esc(g.date) + '. Pick the top three. Each can have a player who gets an assist point, including one of the other top three.</div>';
     AWARDS.forEach(function (a) {
-      var w = aw[a[0]] || {};
-      h += '<div class="card flat stack" style="gap:8px"><div class="field"><label for="aw-' + a[0] + '-p">' + a[3] + '</label>' + sel('aw-' + a[0] + '-p', w.p, 'Not awarded') + '</div>' +
-        '<div class="field"><label for="aw-' + a[0] + '-a">Assist · 1 point (optional)</label>' + sel('aw-' + a[0] + '-a', w.a, 'No assist') + '</div></div>';
+      h += '<div class="card flat stack" style="gap:8px"><div class="field"><label for="aw-' + a[0] + '-p">' + a[3] + '</label><select id="aw-' + a[0] + '-p"></select></div>' +
+        '<div class="field"><label for="aw-' + a[0] + '-a">Assist · 1 point (optional)</label><select id="aw-' + a[0] + '-a"></select></div></div>';
     });
-    openSheet(h + '<button class="btn primary wide" data-act="saveaw" data-id="' + gid + '">Save awards</button><button class="btn wide" data-act="closesheet">' + (g.awards ? 'Cancel' : 'Skip for now') + '</button>');
+    h += '<div class="card flat stack" style="gap:8px"><div class="field"><label>Whole team · 1 point each</label><div class="seg" id="aw-team"><button class="' + (UI.awardTeam ? '' : 'on') + '" data-act="teampt" data-v="0">No</button><button class="' + (UI.awardTeam ? 'on' : '') + '" data-act="teampt" data-v="1">Yes, they played well</button></div>' +
+      '<span class="small muted">Everyone at the game gets 1 point.</span></div></div>';
+    openSheet(h + '<button class="btn primary wide" data-act="saveaw" data-id="' + gid + '">Save awards</button><button class="btn wide" data-act="closesheet">' + (awardsSet(g) ? 'Cancel' : 'Skip for now') + '</button>');
+    AWARDS.forEach(function (a) { $('#aw-' + a[0] + '-p').dataset.init = (aw[a[0]] && aw[a[0]].p) || ''; $('#aw-' + a[0] + '-a').dataset.init = (aw[a[0]] && aw[a[0]].a) || ''; });
+    refreshAwards(true);
+  }
+  // A player can only take one of the three places, so once chosen they drop out of the other two lists.
+  // Anyone except the winner of that place can be given its assist.
+  function refreshAwards(initial) {
+    var ids = UI.awardIds, val = {};
+    AWARDS.forEach(function (a) {
+      var pe = $('#aw-' + a[0] + '-p'), ae = $('#aw-' + a[0] + '-a');
+      val[a[0] + 'p'] = initial ? pe.dataset.init : pe.value;
+      val[a[0] + 'a'] = initial ? ae.dataset.init : ae.value;
+    });
+    function fill(el, list, cur, blank) {
+      el.innerHTML = '<option value="">' + blank + '</option>' + list.map(function (i) { return '<option value="' + i + '">#' + esc(pl(i).num) + ' ' + esc(pl(i).name) + '</option>'; }).join('');
+      el.value = list.indexOf(cur) >= 0 ? cur : '';
+    }
+    AWARDS.forEach(function (a) {
+      var k = a[0], mine = val[k + 'p'];
+      var taken = AWARDS.filter(function (o) { return o[0] !== k; }).map(function (o) { return val[o[0] + 'p']; });
+      fill($('#aw-' + k + '-p'), ids.filter(function (i) { return taken.indexOf(i) < 0; }), mine, 'Not awarded');
+      mine = $('#aw-' + k + '-p').value;
+      var ae = $('#aw-' + k + '-a');
+      fill(ae, ids.filter(function (i) { return i !== mine; }), mine ? val[k + 'a'] : '', mine ? 'No assist' : 'Choose a winner first');
+      ae.disabled = !mine;
+    });
   }
 
   function seasonView() {
@@ -1517,7 +1548,7 @@ var Engine = (function () {
     var vals = ids.map(function (i) { return P[i].played; });
     openSheet('<h2>' + esc(g.opp ? 'vs ' + g.opp : 'Game') + '</h2><div class="muted">' + esc(g.date) + ' · ' + (g.mode === 'best' ? 'ended in Best five' : 'ended in Equal time') + '</div><div class="card flat" style="padding-block:4px">' +
       ids.map(function (i) { var p = pl(i); return '<div class="srow" style="grid-template-columns:34px 1fr auto"><span class="num">' + esc(p.num) + '</span><b>' + esc(p.name) + '</b><span class="r">' + fmt(P[i].played) + '<small class="muted">' + P[i].fouls + ' fouls' + (P[i].status === 'out' ? ' · injured' : P[i].status === 'fo' ? ' · fouled out' : '') + '</small></span></div>'; }).join('') +
-      '</div><button class="btn wide" data-act="awards" data-id="' + gid + '">' + (g.awards ? 'Edit awards' : 'Set awards') + '</button><button class="btn danger wide" data-act="delgame" data-id="' + gid + '">Delete this game</button>');
+      '</div><button class="btn wide" data-act="awards" data-id="' + gid + '">' + (awardsSet(g) ? 'Edit awards' : 'Set awards') + '</button><button class="btn danger wide" data-act="delgame" data-id="' + gid + '">Delete this game</button>');
   }
   function openSeasonPlayer(id) {
     var ss = seasonStats(), s = ss.S[id], p = pl(id);
@@ -1685,10 +1716,14 @@ var Engine = (function () {
     },
     box: function (d) { openBox(d.id); },
     stab: function (d) { UI.stab = d.v; render(); },
+    teampt: function (d) {
+      UI.awardTeam = d.v === '1';
+      document.querySelectorAll('#aw-team button').forEach(function (b) { b.className = (b.dataset.v === '1') === UI.awardTeam ? 'on' : ''; });
+    },
     awards: function (d) { openAwards(d.id); },
     saveaw: function (d) {
       var g = DB.games.filter(function (x) { return x.id === d.id; })[0]; if (!g) return;
-      var aw = {}, seen = {}, bad = null;
+      var aw = { team: !!UI.awardTeam }, seen = {}, bad = null;
       AWARDS.forEach(function (a) {
         var p = $('#aw-' + a[0] + '-p').value, as = $('#aw-' + a[0] + '-a').value;
         if (p) { if (seen[p]) bad = pl(p).name + ' can only be given one place'; seen[p] = 1; }
@@ -1733,6 +1768,7 @@ var Engine = (function () {
   });
   document.addEventListener('change', function (e) {
     var t = e.target;
+    if (t.id && t.id.indexOf('aw-') === 0 && UI.awardIds) { refreshAwards(false); return; }
     if (t.dataset.cfg) { H.cfg({ scope: t.dataset.scope, k: t.dataset.cfg, v: t.value }); return; }
     if (t.dataset.game) { var g = activeGame(); if (g) { g[t.dataset.game] = t.value; save(); } return; }
     if (t.dataset.team) { team()[t.dataset.team] = t.value; save(); }
