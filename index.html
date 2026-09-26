@@ -231,6 +231,30 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 
 .pill-btn { max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font-weight: 600; font-size: 14px; }
 
+.grid2, .grid3 { align-items: end; }
+
+/* court */
+.court { position: relative; width: 100%; aspect-ratio: 54 / 98; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--court); container-type: inline-size; touch-action: pan-y; }
+.court svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.court .tok, .court .spot { position: absolute; transform: translate(-50%, -50%); width: 12.6%; aspect-ratio: 1; border-radius: 50%; padding: 0; }
+.court .spot { border: 2px dashed var(--ink2); background: transparent; opacity: .55; }
+.court .spot.target { opacity: 1; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.tok { border-radius: 50%; border: 2px solid var(--ink); color: #fff; display: flex; align-items: center; justify-content: center; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; font-family: var(--head); }
+.tok b { font-size: 20px; font-size: 5.6cqw; line-height: 1; font-weight: 700; pointer-events: none; }
+.tok i { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 1px; font-style: normal; font-family: var(--body); font-weight: 600; font-size: 11px; font-size: 2.9cqw; line-height: 1.1; color: var(--ink); background: color-mix(in srgb, var(--surface) 80%, transparent); border-radius: 4px; padding: 0 3px; white-space: nowrap; max-width: 17cqw; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.tok.tall { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.tok.mid { background: var(--nav); border-color: var(--nav); }
+.tok.short { background: #1F8A8A; border-color: #1F8A8A; }
+.tok.sel { box-shadow: 0 0 0 3px var(--surface), 0 0 0 6px var(--ink); }
+.tok.drag { z-index: 5; opacity: .9; cursor: grabbing; box-shadow: 0 6px 16px rgba(0,0,0,.35); }
+.tray { display: flex; flex-wrap: wrap; gap: 26px 14px; padding: 4px 4px 22px; }
+.tok.inline { position: relative; width: 56px; height: 56px; transform: none; }
+.tok.inline b { font-size: 22px; }
+.tok.inline i { font-size: 11px; max-width: 70px; }
+.crow { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.crow .seg { width: 150px; }
+.crow .seg button { min-height: 34px; font-size: 13px; }
+
 body{padding-top:calc(12px + env(safe-area-inset-top,0px))}
 [hidden]{display:none!important}</style>
 </head><body><div id="app"></div><div id="toast"></div><nav id="tabs" class="tabs" aria-label="Sections"></nav><div id="sheet"></div>
@@ -402,7 +426,60 @@ var Engine = (function () {
 
   /* ---------- the planner ---------- */
   // opts: { rating:{id:1-5}, owe:{id:sec}, prev:plan, pinCurrent:bool }
+  // Equal time can use more or fewer subs per period than usual, but only when that keeps court time closer to equal.
+  // Options are tried in order of preference: the usual number, then more, then fewer. The first one that is
+  // nearly as fair as the best is used. Mid-period re-plans keep the current number so the schedule doesn't jump.
   function plan(game, tau, opts) {
+    opts = opts || {};
+    var cfg = game.cfg;
+    if (game.mode === 'best' || cfg.subsMin == null || cfg.subsMax == null) return planOnce(game, tau, opts);
+    var pref = cfg.subsPer, lo = Math.min(cfg.subsMin, pref), hi = Math.max(cfg.subsMax, pref), cands = [pref], k;
+    for (k = pref + 1; k <= hi; k++) cands.push(k);
+    for (k = pref - 1; k >= lo; k--) cands.push(k);
+    if (opts.prev && opts.prev.subsPer != null && !opts.fresh) cands = [opts.prev.subsPer];
+    if (cands.length === 1) return planOnce(withSubs(game, cands[0]), tau, opts);
+    var results = cands.map(function (n) { return planOnce(withSubs(game, n), tau, opts); });
+    // First drop options that break the hard rules (each break costs 300 in qual). Of the rest, an option is
+    // acceptable if nobody is more than 1.5 minutes further from their fair time than in the best option,
+    // and fatigue and rest are no worse than in the best option (allowing a little slack).
+    var viol = function (r) { return Math.floor((r.qual || 0) / 250); };
+    var minViol = Math.min.apply(null, results.map(viol));
+    var pool = results.filter(function (r) { return viol(r) === minViol; });
+    var bestDev = Math.min.apply(null, pool.map(function (r) { return r.dev || 0; }));
+    var bestQ = Math.min.apply(null, pool.map(function (r) { return r.qual || 0; }));
+    for (var i = 0; i < pool.length; i++) {
+      if ((pool[i].dev || 0) <= bestDev + 1.5 && (pool[i].qual || 0) <= bestQ + 6) return pool[i];
+    }
+    return pool[0];
+  }
+  function withSubs(game, n) {
+    var g2 = Object.assign({}, game);
+    g2.cfg = Object.assign({}, game.cfg, { subsPer: n });
+    return g2;
+  }
+
+  // Which whole periods each player has sat out so far: available the whole period and never on court.
+  // count: number of whole periods sat out. prev: sat out the most recently finished period.
+  function sitHistory(game, tau) {
+    var count = {}, prev = {}, lens = game.lens, ps = 0, j, id;
+    for (j = 0; j < lens.length; j++) {
+      var pe = ps + lens[j];
+      if (pe > tau + 0.5) break;
+      var a = derive(game, ps).P, b = derive(game, pe).P;
+      prev = {};
+      for (id in b) {
+        if (!a[id]) continue;
+        var full = b[id].avail - a[id].avail >= lens[j] - 1;
+        var sat = full && b[id].played - a[id].played <= 0.5;
+        prev[id] = sat;
+        if (sat) count[id] = (count[id] || 0) + 1;
+      }
+      ps = pe;
+    }
+    return { count: count, prev: prev };
+  }
+
+  function planOnce(game, tau, opts) {
     opts = opts || {};
     var cfg = game.cfg, st = derive(game, tau), P = st.P;
     var A = [], id;
@@ -422,7 +499,7 @@ var Engine = (function () {
     var E = cfg.stintMin * 60;
     var f0 = A.map(function (p) { return p.f; });
     var curOn = ids.map(function (i) { return cur.indexOf(i) >= 0 ? 1 : 0; });
-    var lineups;
+    var lineups, qual = 0, dev = 0;
     var maxSwap = Math.max(1, Math.min(C, cfg.maxSwap || 5));
     var vacancy = C - cur.length;
     // players who may change at each slot boundary. Period starts are a reset, so no cap there.
@@ -433,16 +510,48 @@ var Engine = (function () {
     });
     var startFlags = slots.map(function (sl) { return Math.abs(sl.s - periodStart(game.lens, sl.per)) < 1; });
 
+    // per-quarter court time rules (Equal time only)
+    var rule = null, slotGroup = [], groups = [];
+    slots.forEach(function (sl, k) {
+      if (!groups.length || groups[groups.length - 1].per !== sl.per) groups.push({ per: sl.per, first: k, slots: [] });
+      groups[groups.length - 1].slots.push(k);
+      slotGroup.push(groups.length - 1);
+    });
+    if (game.mode === 'equal' && (cfg.periodRule === 'every' || cfg.periodRule === 'oneSit')) {
+      var hist = sitHistory(game, tau), ps0 = periodStart(game.lens, slots[0].per);
+      var base = derive(game, Math.min(tau, ps0)).P;
+      rule = {
+        mode: cfg.periodRule, groups: groups, slotGroup: slotGroup,
+        pb: A.map(function (p) { return base[p.id] ? Math.max(0, p.played - base[p.id].played) : p.played; }),
+        hasSat: ids.map(function (i) { return !!hist.count[i]; }),
+        sitPrev: ids.map(function (i) { return !!hist.prev[i]; }),
+        seasonSits: ids.map(function (i) { return (opts.sitCount && opts.sitCount[i]) || 0; })
+      };
+    }
+
     if (game.mode === 'best') {
       lineups = planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits);
     } else {
-      lineups = planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags);
+      var res = planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule);
+      lineups = res.lineups; qual = res.qual; dev = res.dev;
     }
-    return finish(slots, ids, lineups, played, cur);
+    var out = finish(slots, ids, lineups, played, cur);
+    out.qual = qual; out.dev = dev; out.subsPer = cfg.subsPer;
+    if (rule && rule.mode === 'oneSit') {
+      out.sits = [];
+      groups.forEach(function (g, gi) {
+        ids.forEach(function (id, i) {
+          var t = (gi === 0 ? rule.pb[i] : 0);
+          g.slots.forEach(function (k) { if (lineups[k].indexOf(id) >= 0) t += slots[k].len; });
+          if (t <= 0.5) out.sits.push({ id: id, per: g.per });
+        });
+      });
+    }
+    return out;
   }
 
   /* ----- equal time ----- */
-  function planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags) {
+  function planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule) {
     var cfg = game.cfg, N = ids.length, S = slots.length;
     var fairShare = C * totalLen(game.lens) / N;
     var factor = cfg.fairness === 'strong' ? 0.6 : cfg.fairness === 'gentle' ? 0.3 : 0;
@@ -452,11 +561,16 @@ var Engine = (function () {
       return p.played + p.base - clamp(o * factor, -cap, cap);
     });
     var need = waterfill(eff, R, C);
-    var order = function (a, b, rem) { return rem[b] - rem[a] || curOn[b] - curOn[a] || a - b; };
+    var gplay = rule ? rule.pb.slice() : null, curGroup = -1;
+    var order = function (a, b, rem) {
+      if (rule) { var dd = (gplay[a] > 0) - (gplay[b] > 0); if (dd) return dd; } // players yet to play this period come first
+      return rem[b] - rem[a] || curOn[b] - curOn[a] || a - b;
+    };
 
     // seed: previous plan if it still fits, otherwise greedy largest-remaining-first
     var on = [], rem = need.slice(), k, i;
     for (k = 0; k < S; k++) {
+      if (rule && rule.slotGroup[k] !== curGroup) { curGroup = rule.slotGroup[k]; gplay = curGroup === 0 ? rule.pb.slice() : new Array(N).fill(0); }
       var row = new Array(N).fill(0), pick = [];
       var pl = (k === 0 && opts.pinCurrent) ? null : lineupAt(opts.prev, slots[k].s);
       if (k === 0 && opts.pinCurrent) {
@@ -478,7 +592,7 @@ var Engine = (function () {
         var prevIdx = [];
         for (i = 0; i < N; i++) if (k ? on[k - 1][i] : curOn[i]) prevIdx.push(i);
         var stay = pick.filter(function (x) { return prevIdx.indexOf(x) >= 0; });
-        var ins = pick.filter(function (x) { return prevIdx.indexOf(x) < 0; }).sort(function (a, b) { return rem[b] - rem[a]; });
+        var ins = pick.filter(function (x) { return prevIdx.indexOf(x) < 0; }).sort(function (a, b) { return order(a, b, rem); });
         var fin = stay.concat(ins.slice(0, limits[k]));
         if (fin.length < C) {
           var more = prevIdx.filter(function (x) { return fin.indexOf(x) < 0; }).sort(function (a, b) { return rem[b] - rem[a]; });
@@ -492,7 +606,7 @@ var Engine = (function () {
         }
         pick = fin;
       }
-      pick.forEach(function (ix) { row[ix] = 1; rem[ix] -= slots[k].len; });
+      pick.forEach(function (ix) { row[ix] = 1; rem[ix] -= slots[k].len; if (gplay) gplay[ix] += slots[k].len; });
       on.push(row);
     }
 
@@ -505,30 +619,58 @@ var Engine = (function () {
     var hTarget = useH ? heightTarget(hgt, C) : 0;
     var sb = opts.startBias ? ids.map(function (i) { return opts.startBias[i] || 0; }) : null;
     // priorities: court time (quota) first, then skill mix, then who has started least, then height mix
+    var usual = cfg.usualSwap != null ? Math.min(cfg.usualSwap, Math.max(1, Math.min(C, cfg.maxSwap || 5))) : null, lastQ = 0, lastDev = 0;
+    var WLOW = 0.6, WHIGH = 6;
     var WF = 40, WS = 4, WB = 0.5, WH = 0.008, WST = 2.5, WC = 0.03, WC0 = 8;
     function cost(o) {
-      var c = 0, tot = new Array(N).fill(0), f = f0.slice(), bs = bs0.slice(), kk, ii, d;
+      var c = 0, q = 0, tot = new Array(N).fill(0), f = f0.slice(), bs = bs0.slice(), kk, ii, d;
+      var pp = rule ? rule.groups.map(function () { return new Array(N).fill(0); }) : null;
       for (kk = 0; kk < S; kk++) {
         var len = slots[kk].len, row = o[kk], changes = 0, sum = 0, hsum = 0;
         for (ii = 0; ii < N; ii++) {
           if (row[ii]) {
             tot[ii] += len; f[ii] += len / E; bs[ii] = 0; sum += rat[ii]; hsum += hgt[ii];
+            if (pp) pp[rule.slotGroup[kk]][ii] += len;
             if (sb && kk === 0) c += WST * sb[ii];
-            if (f[ii] > 1) { d = f[ii] - 1; c += WF * d * d; }
+            if (f[ii] > 1) { d = f[ii] - 1; c += WF * d * d; q += WF * d * d; }
             if (!(kk ? o[kk - 1][ii] : curOn[ii])) changes++;
           } else {
             f[ii] = Math.max(0, f[ii] - len * RECOVERY / E); bs[ii] += len;
-            if (bs[ii] > maxBench) { d = (bs[ii] - maxBench) / 60; c += WS * d * d; }
+            if (bs[ii] > maxBench) { d = (bs[ii] - maxBench) / 60; c += WS * d * d; q += WS * d * d; }
           }
         }
         if (useBal) { d = sum / C - M; c += WB * (len / 60) * d * d; }
         if (useH) { d = hsum - hTarget; c += WH * (len / 60) * d * d; }
         if (kk === 0) c += (opts.pinCurrent ? 1000 : startFlags[0] ? 0.15 : WC0) * changes;
         else c += WC * changes * changes;
-        if (changes > limits[kk] && !(kk === 0 && opts.pinCurrent)) { d = changes - limits[kk]; c += 300 * d * d; }
+        // players per sub: the usual number is preferred, more is discouraged strongly, fewer only lightly
+        if (usual != null && kk > 0 && !startFlags[kk]) c += changes < usual ? WLOW * (usual - changes) : WHIGH * (changes - usual);
+        if (changes > limits[kk] && !(kk === 0 && opts.pinCurrent)) { d = changes - limits[kk]; c += 300 * d * d; q += 300 * d * d; }
         if (slots[kk].brk) for (ii = 0; ii < N; ii++) f[ii] = Math.max(0, f[ii] - slots[kk].brk * RECOVERY / E);
       }
-      for (ii = 0; ii < N; ii++) { d = (tot[ii] - need[ii]) / 60; c += d * d; }
+      if (rule) {
+        var planSits = new Array(N).fill(0), G = rule.groups, gi, nx;
+        for (gi = 0; gi < G.length; gi++) {
+          var sitters = 0;
+          for (ii = 0; ii < N; ii++) {
+            if (pp[gi][ii] + (gi === 0 ? rule.pb[ii] : 0) > 0.5) continue;
+            if (rule.mode === 'every') { c += 300; q += 300; continue; }
+            sitters++; planSits[ii]++;
+            c += 0.5 + 2 * rule.seasonSits[ii];
+            if (rule.hasSat[ii]) { c += 300; q += 300; }
+            nx = G[gi + 1];
+            if (nx && !o[nx.first][ii]) { c += 300; q += 300; } // whoever sits a quarter starts the next one
+          }
+          if (sitters > 1) { d = sitters - 1; c += 300 * d; q += 300 * d; }
+        }
+        for (ii = 0; ii < N; ii++) {
+          if (planSits[ii] > 1) { c += 300; q += 300; }
+          if (rule.mode === 'oneSit' && startFlags[0] && !opts.pinCurrent && rule.sitPrev[ii] && !o[0][ii]) { c += 300; q += 300; }
+        }
+      }
+      var md = 0;
+      for (ii = 0; ii < N; ii++) { d = (tot[ii] - need[ii]) / 60; c += d * d; if (Math.abs(d) > md) md = Math.abs(d); }
+      lastQ = q; lastDev = md;
       return c;
     }
     var lo = opts.pinCurrent ? 1 : 0, span = S - lo;
@@ -561,11 +703,15 @@ var Engine = (function () {
         }
       }
     }
-    return on.map(function (row) {
-      var lu = [];
-      row.forEach(function (v, ix) { if (v) lu.push(ids[ix]); });
-      return lu;
-    });
+    cost(on);
+    return {
+      qual: lastQ, dev: lastDev,
+      lineups: on.map(function (row) {
+        var lu = [];
+        row.forEach(function (v, ix) { if (v) lu.push(ids[ix]); });
+        return lu;
+      })
+    };
   }
 
   /* ----- best players, sub only for fatigue ----- */
@@ -647,7 +793,7 @@ var Engine = (function () {
   }
 
   return {
-    derive: derive, plan: plan, seasonOwe: seasonOwe, rankBench: rankBench,
+    derive: derive, plan: plan, sitHistory: sitHistory, seasonOwe: seasonOwe, rankBench: rankBench,
     periodStart: periodStart, totalLen: totalLen, breakCredit: breakCredit, periodName: periodName,
     buildSlots: buildSlots
   };
@@ -660,8 +806,8 @@ var Engine = (function () {
   'use strict';
   var $ = function (s) { return document.querySelector(s); };
   var KEY = 'sub-planner-v1';
-  var DEF_CFG = { format: 'quarters', periods: 4, periodMin: 8, otMin: 3, onCourt: 5, subsPer: 1, maxSwap: 5, foulLimit: 5, stintMin: 7, fairness: 'gentle', balance: true, balanceHeight: true };
-  var NUMERIC = { periods: 1, periodMin: 1, otMin: 1, onCourt: 1, subsPer: 1, maxSwap: 1, foulLimit: 1, stintMin: 1 };
+  var DEF_CFG = { format: 'quarters', periods: 4, periodMin: 10, otMin: 3, onCourt: 5, subsPer: 2, subsMin: 1, subsMax: 3, usualSwap: 2, maxSwap: 3, foulLimit: 5, stintMin: 7, fairness: 'gentle', balance: true, balanceHeight: true, periodRule: 'every' };
+  var NUMERIC = { periods: 1, periodMin: 1, otMin: 1, onCourt: 1, subsPer: 1, subsMin: 1, subsMax: 1, usualSwap: 1, maxSwap: 1, foulLimit: 1, stintMin: 1 };
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -691,6 +837,10 @@ var Engine = (function () {
   function normCfg(cfg) {
     if (cfg.subsPer == null) cfg.subsPer = Math.max(0, Math.round((cfg.periodMin || 8) / (cfg.subEvery || 4)) - 1);
     if (cfg.maxSwap == null) cfg.maxSwap = 5;
+    if (cfg.subsMin == null) cfg.subsMin = Math.max(0, cfg.subsPer - 1);
+    if (cfg.subsMax == null) cfg.subsMax = cfg.subsPer + 1;
+    if (cfg.usualSwap == null) cfg.usualSwap = Math.min(2, cfg.maxSwap);
+    if (cfg.periodRule == null) cfg.periodRule = 'every';
     if (cfg.balanceHeight == null) cfg.balanceHeight = true;
     delete cfg.subEvery;
     return cfg;
@@ -724,6 +874,12 @@ var Engine = (function () {
       g.present.forEach(function (id) { att[id] = (att[id] || 0) + 1; });
       (g.starters || []).forEach(function (id) { st[id] = (st[id] || 0) + 1; });
     });
+    UI.sits = {};
+    teamGames().forEach(function (g) {
+      if (g.status !== 'done') return;
+      var c = Engine.sitHistory(g, g.finalTau).count;
+      Object.keys(c).forEach(function (id) { UI.sits[id] = (UI.sits[id] || 0) + c[id]; });
+    });
     UI.starts = {}; UI.startRate = {};
     Object.keys(att).forEach(function (id) { UI.starts[id] = st[id] || 0; UI.startRate[id] = (st[id] || 0) / att[id]; });
   }
@@ -750,7 +906,7 @@ var Engine = (function () {
     save();
     return g;
   }
-  function planOpts(extra) { return Object.assign({ rating: ratingMap(), height: heightMap(), owe: UI.owe }, extra || {}); }
+  function planOpts(extra) { return Object.assign({ rating: ratingMap(), height: heightMap(), owe: UI.owe, sitCount: UI.sits }, extra || {}); }
   function autoStarters(g) {
     var C = Math.min(g.cfg.onCourt, g.present.length);
     if (!g.present.length) { g.starters = []; return; }
@@ -991,6 +1147,7 @@ var Engine = (function () {
   var ICON = {
     game: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3v18M5.6 5.6c3 3 3 10.8 0 12.8M18.4 5.6c-3 3-3 10.8 0 12.8"/></svg>',
     plan: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/></svg>',
+    court: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M12 5v14M3 9.5h3v5H3M21 9.5h-3v5h3"/><circle cx="12" cy="12" r="2"/></svg>',
     season: '<svg viewBox="0 0 24 24"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>',
     team: '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.5 2.7-6 6-6s6 2.5 6 6M16 5a3 3 0 010 6M18 14c2 .8 3 3 3 6"/></svg>'
   };
@@ -998,7 +1155,7 @@ var Engine = (function () {
   function fatClass(f) { return f >= 0.9 ? 'bad' : f >= 0.65 ? 'warn' : ''; }
 
   function tabsHtml() {
-    var t = [['game', 'Game'], ['plan', 'Plan'], ['season', 'Season'], ['team', 'Team']];
+    var t = [['game', 'Game'], ['plan', 'Plan'], ['court', 'Court'], ['season', 'Season'], ['team', 'Team']];
     return '<div class="tabs-in">' + t.map(function (x) {
       return '<button class="tab' + (UI.tab === x[0] ? ' on' : '') + '" data-act="tab" data-v="' + x[0] + '">' + ICON[x[0]] + x[1] + '</button>';
     }).join('') + '</div>';
@@ -1015,6 +1172,25 @@ var Engine = (function () {
       return '<option value="' + v + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + t + '</option>';
     }).join('') + '</select>';
   }
+  function subFields(scope, cfg) {
+    var per = cfg.format === 'halves' ? 'half' : 'quarter', n = function (k) { return [k, k === 0 ? 'None' : k === 1 ? '1 sub' : k + ' subs']; };
+    var counts = [0, 1, 2, 3, 4, 5, 6].map(n);
+    return '<div class="stack" style="gap:10px"><div class="lbl" style="padding-top:4px">Substitutions in Equal time</div><div class="grid3">' +
+      '<div class="field"><label for="cfg-' + scope + '-subsPer">Usual subs per ' + per + '</label>' + selCfg(scope, 'subsPer', cfg.subsPer, counts) + '</div>' +
+      '<div class="field"><label for="cfg-' + scope + '-subsMin">Sometimes as few as</label>' + selCfg(scope, 'subsMin', cfg.subsMin, counts) + '</div>' +
+      '<div class="field"><label for="cfg-' + scope + '-subsMax">Sometimes up to</label>' + selCfg(scope, 'subsMax', cfg.subsMax, counts) + '</div></div>' +
+      '<div class="grid2"><div class="field"><label for="cfg-' + scope + '-usualSwap">Usual players per sub</label>' + selCfg(scope, 'usualSwap', cfg.usualSwap, [[1, '1 player'], [2, '2 players'], [3, '3 players'], [4, '4 players'], [5, '5 players']]) + '</div>' +
+      '<div class="field"><label for="cfg-' + scope + '-maxSwap">Never more than</label>' + selCfg(scope, 'maxSwap', cfg.maxSwap, [[1, '1 player'], [2, '2 players'], [3, '3 players'], [4, '4 players'], [5, 'No limit']]) + '</div></div>' +
+      '<span class="small muted">The plan starts with the usual numbers. It only uses more or fewer subs per ' + per + ', or a different number of players, when that keeps court time closer to equal. At each break you can change everyone, and the app suggests the next starting five. Best five only subs when players tire.</span></div>';
+  }
+  function ruleField(scope, cfg) {
+    var per = cfg.format === 'halves' ? 'half' : 'quarter';
+    var text = { every: 'Everyone gets some court time in every ' + per + '. If the roster is big, the plan uses more subs to fit everyone in.',
+      oneSit: 'One player at a time may sit out a whole ' + per + ', and they must start the next one. Nobody sits twice in a game. Sit-outs are counted over the season and the players with the fewest are chosen first.',
+      none: 'No rules. Players can sit out several quarters in a row if that is what equal time needs.' };
+    return '<div class="field"><label>Court time in each ' + per + '</label>' + seg(scope, 'periodRule', cfg.periodRule, [['every', 'Everyone plays'], ['oneSit', 'One may sit out'], ['none', 'No rules']]) +
+      '<span class="small muted">' + text[cfg.periodRule] + '</span></div>';
+  }
   function cfgForm(scope, cfg) {
     var pm = cfg.format === 'halves' ? [10, 12, 15, 16, 18, 20, 22, 25, 30] : [4, 5, 6, 7, 8, 9, 10, 12, 15];
     if (pm.indexOf(cfg.periodMin) < 0) pm.push(cfg.periodMin);
@@ -1025,12 +1201,9 @@ var Engine = (function () {
       '<div class="field"><label for="cfg-' + scope + '-periodMin">' + (cfg.format === 'halves' ? 'Half' : 'Quarter') + ' length</label>' + selCfg(scope, 'periodMin', cfg.periodMin, pm, ' min') + '</div>' +
       '<div class="field"><label for="cfg-' + scope + '-otMin">Overtime</label>' + selCfg(scope, 'otMin', cfg.otMin, [1, 2, 3, 4, 5], ' min') + '</div>' +
       '<div class="field"><label for="cfg-' + scope + '-onCourt">Players on court</label>' + selCfg(scope, 'onCourt', cfg.onCourt, [3, 4, 5], '') + '</div>' +
-      '<div class="field"><label for="cfg-' + scope + '-subsPer">Subs per ' + (cfg.format === 'halves' ? 'half' : 'quarter') + '</label>' + selCfg(scope, 'subsPer', cfg.subsPer, [[0, 'None'], [1, '1 sub'], [2, '2 subs'], [3, '3 subs'], [4, '4 subs'], [5, '5 subs'], [6, '6 subs']]) + '</div>' +
-      '<div class="field"><label for="cfg-' + scope + '-maxSwap">Most players per sub</label>' + selCfg(scope, 'maxSwap', cfg.maxSwap, [[1, '1 player'], [2, '2 players'], [3, '3 players'], [4, '4 players'], [5, 'No limit']]) + '</div>' +
       '<div class="field"><label for="cfg-' + scope + '-foulLimit">Foul out at</label>' + selCfg(scope, 'foulLimit', cfg.foulLimit, [[0, 'No limit'], [4, '4 fouls'], [5, '5 fouls'], [6, '6 fouls']]) + '</div>' +
       '<div class="field"><label for="cfg-' + scope + '-stintMin">Tires after</label>' + selCfg(scope, 'stintMin', cfg.stintMin, [4, 5, 6, 7, 8, 10, 12], ' min') + '</div>' +
-      '</div>' +
-      '<span class="small muted">Subs per ' + (cfg.format === 'halves' ? 'half' : 'quarter') + ' and the player limit apply to Equal time. At each break you can change everyone, and the app suggests the next starting five. Best five only subs when players tire.</span>' +
+      '</div>' + subFields(scope, cfg) + ruleField(scope, cfg) +
       '<div class="field"><label>Season fairness</label>' + seg(scope, 'fairness', cfg.fairness, [['off', 'Off'], ['gentle', 'Gentle'], ['strong', 'Strong']]) +
       '<span class="small muted">Gives extra court time to kids who are behind on the season, and less to kids who are ahead.</span></div>' +
       '<div class="field"><label>Mix skill levels in each lineup</label>' + seg(scope, 'balance', cfg.balance, [['true', 'On'], ['false', 'Off']]) +
@@ -1086,7 +1259,8 @@ var Engine = (function () {
     if (pp && g.present.length > g.cfg.onCourt && g.mode === 'equal') {
       var v = Object.keys(pp.proj).map(function (k) { return pp.proj[k]; }), spread = Math.max.apply(null, v) - Math.min.apply(null, v);
       h += '<div class="card"><b>Projected: ' + fmt(Math.min.apply(null, v)) + ' to ' + fmt(Math.max.apply(null, v)) + ' minutes each</b><br><span class="small muted">' +
-        (spread > 150 && (g.cfg.subsPer < 5 || g.cfg.maxSwap < 5) ? 'More subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ', or more players per sub, gives a closer split.' : 'See the Plan tab for the full rotation.') + '</span></div>';
+        (spread > 150 && (g.cfg.subsMax < 6 || g.cfg.maxSwap < 5) ? 'More subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ', or more players per sub, gives a closer split.' : 'See the Plan tab for the full rotation.') +
+        (pp.subsPer != null && pp.subsPer !== g.cfg.subsPer ? '<br>Using ' + pp.subsPer + ' subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' instead of the usual ' + g.cfg.subsPer + ' to keep court time closer to equal.' : '') + sitsNote(g, pp) + '</span></div>';
     }
     h += '<div class="sec-title"><span>Game rules</span></div><div class="card">' + cfgForm('game', g.cfg) + '</div>';
     h += '<button class="btn primary wide" style="min-height:56px;font-size:18px" data-act="start">Start game</button></div>';
@@ -1210,7 +1384,8 @@ var Engine = (function () {
     h += '<div class="stack">';
     if (g.mode === 'equal' && ids.length > g.cfg.onCourt) {
       h += '<div class="card"><b>Projected: ' + fmt(mn) + ' to ' + fmt(mx) + ' minutes each</b>' +
-        (mx - mn > 150 && (g.cfg.subsPer < 5 || g.cfg.maxSwap < 5) ? '<br><span class="small muted">The gap comes from the limits on subs. More subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' or more players per sub narrows it.</span>' : '') + '</div>';
+        (mx - mn > 150 && (g.cfg.subsMax < 6 || g.cfg.maxSwap < 5) ? '<br><span class="small muted">The gap comes from the limits on subs. More subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' or more players per sub narrows it.</span>' : '') +
+        (plan.subsPer != null && plan.subsPer !== g.cfg.subsPer ? '<br><span class="small muted">Using ' + plan.subsPer + ' subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' instead of the usual ' + g.cfg.subsPer + ' to keep court time closer to equal.</span>' : '') + (sitsNote(g, plan) ? '<span class="small muted">' + sitsNote(g, plan).replace(/^<br>/, '') + '</span>' : '') + '</div>';
     } else if (g.mode === 'best') {
       h += '<div class="card small muted">Best five keeps your top-rated players on and only swaps for fatigue. Ratings are set in Team. Tired after ' + g.cfg.stintMin + ' minutes on court.</div>';
     }
@@ -1249,11 +1424,13 @@ var Engine = (function () {
     done.forEach(function (g) {
       var P = Engine.derive(g, g.finalTau).P;
       for (var id in P) {
-        var s = S[id] || (S[id] = { gp: 0, sec: 0, fouls: 0, starts: 0, games: [] });
+        var s = S[id] || (S[id] = { gp: 0, sec: 0, fouls: 0, starts: 0, sits: 0, games: [] });
         s.gp++; s.sec += P[id].played; s.fouls += P[id].fouls;
         if ((g.starters || []).indexOf(id) >= 0) s.starts++;
         s.games.push({ g: g, played: P[id].played, fouls: P[id].fouls, avail: P[id].avail, status: P[id].status });
       }
+      var sc = Engine.sitHistory(g, g.finalTau).count;
+      Object.keys(sc).forEach(function (id) { if (S[id]) S[id].sits += sc[id]; });
     });
     return { S: S, n: done.length, done: done };
   }
@@ -1352,13 +1529,17 @@ var Engine = (function () {
     });
   }
 
+  function sitsNote(g, plan) {
+    if (!plan || !plan.sits || !plan.sits.length) return '';
+    return '<br>Sitting out a whole ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ': ' + plan.sits.map(function (x) { var p = pl(x.id); return '#' + esc(p.num) + ' ' + esc(p.name) + ' (' + Engine.periodName(g.cfg, x.per) + ')'; }).join(', ') + '. They start the next one.';
+  }
   function seasonView() {
     var ss = seasonStats(), h = '<div class="appbar"><h1>Season</h1>' + teamPill() + '</div>';
     h += '<div class="seg" style="margin-bottom:12px"><button class="' + (UI.stab !== 'mvp' ? 'on' : '') + '" data-act="stab" data-v="min">Minutes</button><button class="' + (UI.stab === 'mvp' ? 'on' : '') + '" data-act="stab" data-v="mvp">MVP table</button></div>';
     if (UI.stab === 'mvp') return h + mvpBody();
     if (!ss.n) return h + '<div class="card">No finished games yet. When you end a game, minutes and fouls for every player land here, and the planner uses them to keep the season fair.</div>';
     var rows = players().map(function (p) {
-      var s = ss.S[p.id] || { gp: 0, sec: 0, fouls: 0, starts: 0 };
+      var s = ss.S[p.id] || { gp: 0, sec: 0, fouls: 0, starts: 0, sits: 0 };
       return { p: p, s: s, avg: s.gp ? s.sec / s.gp : 0, owe: UI.owe[p.id] || 0 };
     }).filter(function (r) { return r.s.gp || !r.p.archived; });
     var att = rows.filter(function (r) { return r.s.gp; });
@@ -1368,7 +1549,7 @@ var Engine = (function () {
     h += '<div class="stack"><div class="card"><b>' + ss.n + (ss.n === 1 ? ' game' : ' games') + ' · average minutes per game played</b><br><span class="small muted">Team average ' + fmt(teamAvg) + ', marked by the line. Owed is time a player is behind a fair share of the games they attended. Injuries, foul-outs and late arrivals are not counted against anyone.</span></div>';
     h += '<div class="card flat" style="padding-block:4px">' + rows.map(function (r) {
       var o = r.owe;
-      return '<button class="srow" data-act="sp" data-id="' + r.p.id + '"><span class="num">' + esc(r.p.num) + '</span><span><b>' + esc(r.p.name) + '</b><br><span class="small muted">' + r.s.gp + '/' + ss.n + ' games · ' + r.s.starts + ' starts · ' + r.s.fouls + ' fouls</span>' +
+      return '<button class="srow" data-act="sp" data-id="' + r.p.id + '"><span class="num">' + esc(r.p.num) + '</span><span><b>' + esc(r.p.name) + '</b><br><span class="small muted">' + r.s.gp + '/' + ss.n + ' games · ' + r.s.starts + ' starts · ' + r.s.fouls + ' fouls' + (r.s.sits ? ' · sat out ' + r.s.sits + (team().cfg.format === 'halves' ? (r.s.sits === 1 ? ' half' : ' halves') : (r.s.sits === 1 ? ' quarter' : ' quarters')) : '') + '</span>' +
         '<div class="bars"><s style="width:' + Math.round(r.avg / mx * 100) + '%"></s><u style="left:' + Math.round(teamAvg / mx * 100) + '%"></u></div></span>' +
         '<span class="r">' + fmt(r.avg) + '<small class="' + (o > 30 ? 'owed-pos' : o < -30 ? 'owed-neg' : 'muted') + '">' + (Math.abs(o) < 30 ? 'even' : (o > 0 ? '+' : '−') + fmt(Math.abs(o)) + (o > 0 ? ' owed' : ' ahead')) + '</small></span></button>';
     }).join('') + '</div>';
@@ -1496,8 +1677,7 @@ var Engine = (function () {
   function openSubSettings() {
     var g = activeGame(), cfg = g.cfg, per = cfg.format === 'halves' ? 'half' : 'quarter';
     openSheet('<h2>Sub settings</h2><div class="muted">Changes apply from now on and the plan updates straight away.</div>' +
-      '<div class="field"><label for="cfg-live-subsPer">Subs per ' + per + '</label>' + selCfg('live', 'subsPer', cfg.subsPer, [[0, 'None'], [1, '1 sub'], [2, '2 subs'], [3, '3 subs'], [4, '4 subs'], [5, '5 subs'], [6, '6 subs']]) + '</div>' +
-      '<div class="field"><label for="cfg-live-maxSwap">Most players per sub</label>' + selCfg('live', 'maxSwap', cfg.maxSwap, [[1, '1 player'], [2, '2 players'], [3, '3 players'], [4, '4 players'], [5, 'No limit']]) + '</div>' +
+      subFields('live', cfg) + ruleField('live', cfg) +
       '<div class="field"><label for="cfg-live-stintMin">Tires after</label>' + selCfg('live', 'stintMin', cfg.stintMin, [4, 5, 6, 7, 8, 10, 12], ' min') + '</div>' +
       '<button class="btn primary wide" data-act="closesheet">Done</button>');
   }
@@ -1567,11 +1747,106 @@ var Engine = (function () {
       '<div class="lbl">Restore</div><textarea id="bk-in" placeholder="Paste a backup here"></textarea><button class="btn danger wide" data-act="restorebk">Restore from pasted backup</button>');
   }
 
+
+  /* ---- court positions ---- */
+  // Full court drawn in feet: 50 wide, 94 long, viewBox padded by 2. Your end is the bottom half, so a full-court
+  // press means dragging players up into the top half. Players can be dragged anywhere.
+  function heightOf(id) { return pl(id).height || 3; }
+  function byHeight(lineup) {
+    return lineup.slice().sort(function (a, b) { return heightOf(b) - heightOf(a) || (pl(b).rating || 3) - (pl(a).rating || 3) || (parseInt(pl(a).num, 10) || 0) - (parseInt(pl(b).num, 10) || 0); });
+  }
+  // Default: the taller players in a row near the basket (tallest in the middle), the rest in a row at the top of the key.
+  function defaultForm(lineup) {
+    var sorted = byHeight(lineup), nBig = Math.min(3, Math.ceil(sorted.length * 0.6)), pos = {};
+    var bigX = { 1: [25], 2: [15, 35], 3: [10, 25, 40] }, smallX = { 1: [25], 2: [18, 32], 3: [14, 25, 36] };
+    var bigOrder = nBig === 3 ? [1, 0, 2] : nBig === 2 ? [0, 1] : [0];
+    bigOrder.forEach(function (slot, i) { if (sorted[i]) pos[sorted[i]] = { x: bigX[nBig][slot], y: 85 }; });
+    var rest = sorted.slice(nBig), n = Math.min(rest.length, 3);
+    rest.forEach(function (id, i) { pos[id] = { x: (smallX[n] || smallX[3])[Math.min(i, n - 1)], y: 69 }; });
+    return { pos: pos };
+  }
+  // Keep the diagram in step with who is on court. A player who comes on takes the spot of the player they replace.
+  function syncForm(f, lineup) {
+    var freed = [];
+    Object.keys(f.pos).forEach(function (id) { if (lineup.indexOf(id) < 0) { freed.push({ id: id, x: f.pos[id].x, y: f.pos[id].y }); delete f.pos[id]; } });
+    var unplaced = lineup.filter(function (id) { return !f.pos[id]; });
+    freed.forEach(function (fr) {
+      if (!unplaced.length) return;
+      var hf = heightOf(fr.id);
+      unplaced.sort(function (a, b) { return Math.abs(heightOf(a) - hf) - Math.abs(heightOf(b) - hf); });
+      f.pos[unplaced.shift()] = { x: fr.x, y: fr.y };
+    });
+    unplaced.forEach(function (id, i) { f.pos[id] = { x: 25 + (i % 2 ? 8 : -8), y: 60 }; });
+  }
+  function courtLineup(g) {
+    if (g.status === 'live') { var st = Engine.derive(g, tauNow(g)).P; return Object.keys(st).filter(function (id) { return st[id].on; }); }
+    return g.starters.slice();
+  }
+  function courtPaint() {
+    function half() {
+      return '<rect x="17" y="0" width="16" height="19"/><path d="M19 19a6 6 0 0 0 12 0"/><path d="M19 19a6 6 0 0 1 12 0" stroke-dasharray="1.2 1.2"/>' +
+        '<path d="M22 4h6"/><circle cx="25" cy="5.25" r="0.75"/><path d="M21 5.25a4 4 0 0 0 8 0"/><path d="M3 0v5.25a22 22 0 0 0 44 0V0"/>';
+    }
+    return '<svg viewBox="-2 -2 54 98" preserveAspectRatio="none" aria-hidden="true"><rect x="-2" y="-2" width="54" height="98" fill="var(--court)"/>' +
+      '<g fill="none" stroke="var(--ink)" stroke-opacity=".5" stroke-width=".45"><rect x="0" y="0" width="50" height="94"/><path d="M0 47h50"/><circle cx="25" cy="47" r="6"/>' +
+      '<g>' + half() + '</g><g transform="translate(0 94) scale(1 -1)">' + half() + '</g></g></svg>';
+  }
+  function tokClass(id) { var h = heightOf(id); return h >= 4 ? 'tall' : h <= 2 ? 'short' : 'mid'; }
+  function courtView(g) {
+    var h = '<div class="appbar"><h1>Court</h1>' + teamPill() + '</div>';
+    if (!g) return h + '<div class="card">Set up a game to arrange where your players stand. The court shows the five on the floor, and it follows your substitutions.</div>';
+    var lineup = courtLineup(g);
+    if (!lineup.length) return h + '<div class="card">Pick your starters in the game setup, then come back to place them.</div>';
+    var before = JSON.stringify(g.form || null);
+    if (!g.form) g.form = defaultForm(lineup);
+    syncForm(g.form, lineup);
+    if (JSON.stringify(g.form) !== before) save();
+    var out = h + '<div class="stack"><div class="card small muted">Your end is the bottom half. Drag players anywhere on the court, and up into the top half to show a press. A substitute takes the spot of the player they replace. Orange players are taller, teal are shorter.</div>';
+    out += '<div class="court" id="court">' + courtPaint();
+    Object.keys(g.form.pos).forEach(function (id) {
+      var p = pl(id), c = g.form.pos[id];
+      out += '<button class="tok ' + tokClass(id) + '" data-pid="' + id + '" style="left:' + ((c.x + 2) / 54 * 100).toFixed(2) + '%;top:' + ((c.y + 2) / 98 * 100).toFixed(2) + '%"><b>' + esc(p.num) + '</b><i>' + esc(p.name) + '</i></button>';
+    });
+    out += '</div><button class="btn wide" data-act="creset">Reset to the default</button><div class="small muted" style="margin-top:-6px">Default: the three tallest in a row near your basket, the other two in a row at the top of the key.</div></div>';
+    return out;
+  }
+  var drag = null;
+  document.addEventListener('pointerdown', function (e) {
+    var t = e.target.closest && e.target.closest('.court .tok'); if (!t) return;
+    drag = { el: t, id: e.pointerId, x0: e.clientX, y0: e.clientY, moved: false };
+    try { t.setPointerCapture(e.pointerId); } catch (x) { }
+  });
+  document.addEventListener('pointermove', function (e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    var dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+    if (!drag.moved && Math.hypot(dx, dy) > 4) { drag.moved = true; drag.el.classList.add('drag'); }
+    if (drag.moved) drag.el.style.transform = 'translate(-50%,-50%) translate(' + dx + 'px,' + dy + 'px)';
+  });
+  function endDrag(e, cancel) {
+    if (!drag || e.pointerId !== drag.id) return;
+    var d = drag; drag = null;
+    if (!d.moved) return;
+    var g = activeGame(), court = document.getElementById('court');
+    if (!cancel && g && g.form && court) {
+      var r = court.getBoundingClientRect(), pid = d.el.dataset.pid, c = g.form.pos[pid];
+      if (c) {
+        c.x = Math.max(3, Math.min(47, c.x + (e.clientX - d.x0) / r.width * 54));
+        c.y = Math.max(3, Math.min(91, c.y + (e.clientY - d.y0) / r.height * 98));
+        c.x = Math.round(c.x * 10) / 10; c.y = Math.round(c.y * 10) / 10;
+        save();
+      }
+    }
+    render();
+  }
+  document.addEventListener('pointerup', function (e) { endDrag(e, false); });
+  document.addEventListener('pointercancel', function (e) { endDrag(e, true); });
+
   /* ---------------- render ---------------- */
   function render() {
     var y = window.scrollY, g = activeGame(), h = '';
     if (UI.tab === 'game') h = g ? (g.status === 'setup' ? setupView(g) : liveView(g)) : homeView();
     else if (UI.tab === 'plan') h = planView(g);
+    else if (UI.tab === 'court') h = courtView(g);
     else if (UI.tab === 'season') h = seasonView();
     else h = teamView();
     var app = $('#app');
@@ -1603,7 +1878,7 @@ var Engine = (function () {
       DB.teams = DB.teams.filter(function (t) { return t.id !== id; });
       DB.teamId = DB.teams[0].id; recomputeOwe(); save(); closeSheet(); UI.tab = 'game'; render();
     },
-    tab: function (d) { UI.tab = d.v; try { sessionStorage.setItem('sp-tab', d.v); } catch (e) { } window.scrollTo(0, 0); render(); },
+    tab: function (d) { UI.tab = d.v; try { sessionStorage.setItem('sp-tab', d.v); } catch (e) { } window.scrollTo(0, 0); render(); if (d.v === 'court') window.scrollTo(0, document.body.scrollHeight); },
     closesheet: function () { closeSheet(); },
     newgame: function () { newGame(); UI.tab = 'game'; render(); },
     discard: function () { confirmSheet('Discard this game?', 'The setup will be removed.', 'discard2', '', 'Discard game'); },
@@ -1641,9 +1916,15 @@ var Engine = (function () {
       var g = (d.scope === 'game' || d.scope === 'live') ? activeGame() : null, cfg = g ? g.cfg : team().cfg, v = d.v;
       if (d.k === 'balance' || d.k === 'balanceHeight') v = v === 'true'; else if (NUMERIC[d.k]) v = Number(v);
       if (d.k === 'format') {
-        cfg.format = v; cfg.periods = v === 'halves' ? 2 : 4; cfg.periodMin = v === 'halves' ? 20 : 8;
-        cfg.subsPer = v === 'halves' ? 3 : 1;
+        cfg.format = v; cfg.periods = v === 'halves' ? 2 : 4; cfg.periodMin = v === 'halves' ? 20 : 10;
+        cfg.subsPer = v === 'halves' ? 3 : 2; cfg.subsMin = cfg.subsPer - 1; cfg.subsMax = cfg.subsPer + 1;
       } else cfg[d.k] = v;
+      // keep the ranges sensible: fewest <= usual <= most, and usual players per sub <= the limit
+      if (cfg.subsMin > cfg.subsPer) { if (d.k === 'subsMin') cfg.subsPer = cfg.subsMin; else cfg.subsMin = cfg.subsPer; }
+      if (cfg.subsMax < cfg.subsPer) { if (d.k === 'subsMax') cfg.subsPer = cfg.subsMax; else cfg.subsMax = cfg.subsPer; }
+      if (cfg.subsMin > cfg.subsPer) cfg.subsMin = cfg.subsPer;
+      if (cfg.subsMax < cfg.subsPer) cfg.subsMax = cfg.subsPer;
+      if (cfg.usualSwap > cfg.maxSwap) { if (d.k === 'usualSwap') cfg.maxSwap = cfg.usualSwap; else cfg.usualSwap = cfg.maxSwap; }
       if (g && g.status === 'setup') { g.lens = makeLens(cfg); autoStartersKeep(g); }
       else if (g && g.status === 'live') replan(g);
       save(); render();
@@ -1716,6 +1997,7 @@ var Engine = (function () {
     },
     box: function (d) { openBox(d.id); },
     stab: function (d) { UI.stab = d.v; render(); },
+    creset: function () { var g = activeGame(); g.form = defaultForm(courtLineup(g)); save(); render(); },
     teampt: function (d) {
       UI.awardTeam = d.v === '1';
       document.querySelectorAll('#aw-team button').forEach(function (b) { b.className = (b.dataset.v === '1') === UI.awardTeam ? 'on' : ''; });
