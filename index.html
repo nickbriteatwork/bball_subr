@@ -255,6 +255,20 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 .crow .seg { width: 150px; }
 .crow .seg button { min-height: 34px; font-size: 13px; }
 
+/* rating boxes */
+:root { --exp: var(--accent); --ht: #1F8A8A; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ht: #3FB8B8; } }
+:root[data-theme="dark"] { --ht: #3FB8B8; }
+.pips { display: inline-flex; gap: 3px; vertical-align: middle; }
+.pips i { width: 11px; height: 11px; border-radius: 3px; border: 1.5px solid currentColor; opacity: .35; box-sizing: border-box; }
+.pips i.f { opacity: 1; background: currentColor; }
+.pips.exp { color: var(--exp); }
+.pips.ht { color: var(--ht); }
+.rate2 { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 3px; align-items: flex-start; }
+.srow .rate2 { align-items: flex-end; margin: 0; }
+.legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 8px 0 4px; font-size: 12px; color: var(--ink2); }
+.legend span { margin-right: 6px; }
+
 body{padding-top:calc(12px + env(safe-area-inset-top,0px))}
 [hidden]{display:none!important}</style>
 </head><body><div id="app"></div><div id="toast"></div><nav id="tabs" class="tabs" aria-label="Sections"></nav><div id="sheet"></div>
@@ -1228,7 +1242,14 @@ var Engine = (function () {
     season: '<svg viewBox="0 0 24 24"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>',
     team: '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.5 2.7-6 6-6s6 2.5 6 6M16 5a3 3 0 010 6M18 14c2 .8 3 3 3 6"/></svg>'
   };
-  function stars(n) { return '<span class="stars" aria-label="' + n + ' of 5">' + '★'.repeat(n) + '<span style="opacity:.25">' + '★'.repeat(5 - n) + '</span></span>'; }
+  // five boxes, n of them filled. kind: 'exp' (orange) or 'ht' (teal)
+  function pips(n, kind) {
+    var h = '<span class="pips ' + kind + '" role="img" aria-label="' + (kind === 'exp' ? 'Experience ' : 'Height ') + n + ' of 5">';
+    for (var i = 1; i <= 5; i++) h += '<i' + (i <= n ? ' class="f"' : '') + '></i>';
+    return h + '</span>';
+  }
+  function ratingLegend() { return '<div class="legend">' + pips(4, 'exp') + '<span>Experience</span>' + pips(4, 'ht') + '<span>Height</span></div>'; }
+  function ratingPips(p) { return '<span class="rate2">' + pips(p.rating || 3, 'exp') + pips(p.height || 3, 'ht') + '</span>'; }
   function fatClass(f) { return f >= 0.9 ? 'bad' : f >= 0.65 ? 'warn' : ''; }
 
   function tabsHtml() {
@@ -1283,10 +1304,10 @@ var Engine = (function () {
       '</div>' + subFields(scope, cfg) + ruleField(scope, cfg) +
       '<div class="field"><label>Season fairness</label>' + seg(scope, 'fairness', cfg.fairness, [['off', 'Off'], ['gentle', 'Gentle'], ['strong', 'Strong']]) +
       '<span class="small muted">Gives extra court time to kids who are behind on the season, and less to kids who are ahead.</span></div>' +
-      '<div class="field"><label>Mix skill levels in each lineup</label>' + seg(scope, 'balance', cfg.balance, [['true', 'On'], ['false', 'Off']]) +
-      '<span class="small muted">Uses the star ratings in Team to avoid all the strongest or weakest kids being on together.</span></div>' +
+      '<div class="field"><label>Mix experience levels in each lineup</label>' + seg(scope, 'balance', cfg.balance, [['true', 'On'], ['false', 'Off']]) +
+      '<span class="small muted">Uses the experience ratings in Team to spread newer and more experienced players across the lineups.</span></div>' +
       '<div class="field"><label>Mix heights in each lineup</label>' + seg(scope, 'balanceHeight', cfg.balanceHeight, [['true', 'On'], ['false', 'Off']]) +
-      '<span class="small muted">Aims for ' + Math.ceil(cfg.onCourt * 0.6) + ' taller and ' + (cfg.onCourt - Math.ceil(cfg.onCourt * 0.6)) + ' smaller players on court, using the height rating in Team. Court time comes first, then stars, then height.</span></div>' +
+      '<span class="small muted">Aims for ' + Math.ceil(cfg.onCourt * 0.6) + ' taller and ' + (cfg.onCourt - Math.ceil(cfg.onCourt * 0.6)) + ' smaller players on court, using the height rating in Team. Court time comes first, then experience, then height.</span></div>' +
       '</div>';
   }
 
@@ -1317,19 +1338,19 @@ var Engine = (function () {
       '<div class="field"><label>Substitution style</label>' + '<div class="seg">' +
       '<button class="' + (g.mode === 'equal' ? 'on' : '') + '" data-act="mode" data-v="equal">Equal time</button>' +
       '<button class="' + (g.mode === 'best' ? 'on' : '') + '" data-act="mode" data-v="best">Best five</button></div>' +
-      '<span class="small muted">' + (g.mode === 'equal' ? 'Everyone gets a fair share of the game, adjusted for the season so far.' : 'Your best players stay on. Subs only when someone is tired, hurt or in foul trouble.') + '</span></div></div>';
+      '<span class="small muted">' + (g.mode === 'equal' ? 'Everyone gets a fair share of the game, adjusted for the season so far.' : 'Your most experienced players stay on. Subs only when someone is tired, hurt or in foul trouble.') + '</span></div></div>';
 
-    h += '<div class="sec-title"><span>Who is here</span><span>' + g.present.length + ' playing · ' + g.starters.length + '/' + C + ' starters</span></div><div class="card flat" style="padding-block:4px">';
+    h += '<div class="sec-title"><span>Who is here</span><span>' + g.present.length + ' playing · ' + g.starters.length + '/' + C + ' starters</span></div><div class="card flat" style="padding-block:4px">' + ratingLegend();
     players().filter(function (p) { return !p.archived; }).forEach(function (p) {
       var isP = g.present.indexOf(p.id) >= 0, isS = g.starters.indexOf(p.id) >= 0;
       var o = UI.owe[p.id] || 0, sc = UI.starts && UI.starts[p.id] != null ? UI.starts[p.id] : 0;
-      h += '<div class="pstate"><span class="num">' + esc(p.num) + '</span><span><b>' + esc(p.name) + '</b><br><span class="small muted">' + stars(p.rating || 3) + '<br>Height ' + (p.height || 3) + ' · ' + sc + (sc === 1 ? ' start' : ' starts') +
+      h += '<div class="pstate"><span class="num">' + esc(p.num) + '</span><span><b>' + esc(p.name) + '</b><br>' + ratingPips(p) + '<span class="small muted">' + sc + (sc === 1 ? ' start' : ' starts') +
         (Math.abs(o) >= 30 ? '<br><span class="' + (o > 0 ? 'owed-pos' : 'owed-neg') + '">' + (o > 0 ? '+' : '−') + fmt(Math.abs(o)) + ' season</span>' : '') + '</span></span>' +
         '<div class="seg"><button class="st ' + (isS ? 'on' : '') + '" data-act="pstate" data-id="' + p.id + '" data-v="start">Start</button>' +
         '<button class="' + (isP && !isS ? 'on' : '') + '" data-act="pstate" data-id="' + p.id + '" data-v="bench">Bench</button>' +
         '<button class="ab ' + (!isP ? 'on' : '') + '" data-act="pstate" data-id="' + p.id + '" data-v="out">Absent</button></div></div>';
     });
-    h += '</div><button class="btn wide" data-act="autostart">Suggest starters</button><div class="small muted" style="margin-top:-6px">Favours players who have started least this season, then balances stars and height.</div>';
+    h += '</div><button class="btn wide" data-act="autostart">Suggest starters</button><div class="small muted" style="margin-top:-6px">Favours players who have started least this season, then balances experience and height.</div>';
     if (g.present.length < g.cfg.onCourt) h += '<div class="note">Only ' + g.present.length + ' players. You will play short-handed with everyone on court the whole game.</div>';
 
     var pp = previewPlan(g);
@@ -1473,7 +1494,7 @@ var Engine = (function () {
         (mx - mn > 150 && (g.cfg.subsMax < 6 || g.cfg.maxSwap < 5) ? '<br><span class="small muted">The gap comes from the limits on subs. More subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' or more players per sub narrows it.</span>' : '') +
         (plan.subsPer != null && plan.subsPer !== g.cfg.subsPer ? '<br><span class="small muted">Using ' + plan.subsPer + ' subs per ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' instead of the usual ' + g.cfg.subsPer + ' to keep court time closer to equal.</span>' : '') + (sitsNote(g, plan) ? '<span class="small muted">' + sitsNote(g, plan).replace(/^<br>/, '') + '</span>' : '') + '</div>';
     } else if (g.mode === 'best') {
-      h += '<div class="card small muted">Best five keeps your top-rated players on and only swaps for fatigue. Ratings are set in Team. Tired after ' + g.cfg.stintMin + ' minutes on court.</div>';
+      h += '<div class="card small muted">Best five keeps your most experienced players on and only swaps for fatigue. Experience ratings are set in Team. Tired after ' + g.cfg.stintMin + ' minutes on court.</div>';
     }
     var segs = plan.segments;
     h += '<div class="gridwrap"><table class="g"><thead><tr><th class="nm">Player</th>' + segs.map(function (s) {
@@ -1649,11 +1670,11 @@ var Engine = (function () {
   function teamView() {
     var h = '<div class="appbar"><h1>Team</h1>' + teamPill() + '</div><div class="stack">';
     h += '<div class="card"><div class="field"><label for="team-name">Team name</label><input type="text" id="team-name" data-team="name" value="' + esc(team().name) + '" autocomplete="off"></div></div>';
-    h += '<div class="sec-title"><span>Roster</span><span>' + players().filter(function (p) { return !p.archived; }).length + ' players</span></div><div class="card flat" style="padding-block:4px">';
+    h += '<div class="sec-title"><span>Roster</span><span>' + players().filter(function (p) { return !p.archived; }).length + ' players</span></div><div class="card flat" style="padding-block:4px">' + ratingLegend();
     var list = players().filter(function (p) { return !p.archived; });
     if (!list.length) h += '<div class="muted" style="padding:10px 0">No players yet.</div>';
     list.forEach(function (p) {
-      h += '<button class="srow" data-act="editp" data-id="' + p.id + '" style="grid-template-columns:34px 1fr auto"><span class="num">' + esc(p.num) + '</span><b>' + esc(p.name) + '</b><span style="text-align:right">' + stars(p.rating || 3) + '<br><span class="small muted">Height ' + (p.height || 3) + '</span></span></button>';
+      h += '<button class="srow" data-act="editp" data-id="' + p.id + '" style="grid-template-columns:34px 1fr auto"><span class="num">' + esc(p.num) + '</span><b>' + esc(p.name) + '</b><span style="text-align:right">' + ratingPips(p) + '</span></button>';
     });
     h += '</div><button class="btn primary wide" data-act="addp">Add player</button>';
     if (!list.length) h += '<button class="btn wide" data-act="sample">Load a sample team</button>';
@@ -1801,8 +1822,8 @@ var Engine = (function () {
     openSheet('<h2>' + (id ? 'Edit player' : 'Add player') + '</h2>' +
       '<div class="grid2"><div class="field"><label for="ep-name">Name</label><input type="text" id="ep-name" value="' + esc(p.name) + '" autocomplete="off"></div>' +
       '<div class="field"><label for="ep-num">Number</label><input type="text" inputmode="numeric" id="ep-num" value="' + esc(p.num) + '"></div></div>' +
-      '<div class="field"><label>Skill rating</label><div class="seg" id="ep-rate">' + [1, 2, 3, 4, 5].map(function (n) { return '<button class="' + (n === UI.editRating ? 'on' : '') + '" data-act="rate" data-v="' + n + '">' + n + '</button>'; }).join('') + '</div>' +
-      '<span class="small muted">1 is still learning, 5 is your strongest. Used for balancing lineups and for Best five.</span></div>' +
+      '<div class="field"><label>Experience</label><div class="seg" id="ep-rate">' + [1, 2, 3, 4, 5].map(function (n) { return '<button class="' + (n === UI.editRating ? 'on' : '') + '" data-act="rate" data-v="' + n + '">' + n + '</button>'; }).join('') + '</div>' +
+      '<span class="small muted">1 is newest to the game, 5 is most experienced. Used for balancing lineups and for Best five.</span></div>' +
       '<div class="field"><label>Height rating</label><div class="seg" id="ep-height">' + [1, 2, 3, 4, 5].map(function (n) { return '<button class="' + (n === UI.editHeight ? 'on' : '') + '" data-act="hrate" data-v="' + n + '">' + n + '</button>'; }).join('') + '</div>' +
       '<span class="small muted">1 is your smallest, 5 is your tallest. The planner aims for about 3 taller and 2 smaller players on court.</span></div>' +
       '<button class="btn primary wide" data-act="savep" data-id="' + (id || '') + '">Save</button>' +
