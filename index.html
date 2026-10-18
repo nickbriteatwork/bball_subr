@@ -437,6 +437,10 @@ var Engine = (function () {
     for (k = pref + 1; k <= hi; k++) cands.push(k);
     for (k = pref - 1; k >= lo; k--) cands.push(k);
     if (opts.prev && opts.prev.subsPer != null && !opts.fresh) cands = [opts.prev.subsPer];
+    // a manual change in the middle of a period sits on a specific slot boundary, so keep that period's slot layout
+    (opts.locked || []).forEach(function (l) {
+      if (l.subsPer != null && l.per != null && Math.abs(l.s - periodStart(game.lens, l.per)) > 1.5) cands = [l.subsPer];
+    });
     if (cands.length === 1) return planOnce(withSubs(game, cands[0]), tau, opts);
     var results = cands.map(function (n) { return planOnce(withSubs(game, n), tau, opts); });
     // First drop options that break the hard rules (each break costs 300 in qual). Of the rest, an option is
@@ -510,6 +514,18 @@ var Engine = (function () {
     });
     var startFlags = slots.map(function (sl) { return Math.abs(sl.s - periodStart(game.lens, sl.per)) < 1; });
 
+    // lineups the coach has fixed for specific changes, matched to the slot that starts at that time
+    var lockRow = slots.map(function () { return null; });
+    (opts.locked || []).forEach(function (l) {
+      var idx = (l.lineup || []).map(function (id) { return ids.indexOf(id); });
+      if (idx.length !== C || idx.some(function (x) { return x < 0; })) return;
+      var kk = -1, j;
+      if (l.s <= slots[0].s + 1.5) kk = 0;
+      else for (j = 1; j < slots.length; j++) if (Math.abs(slots[j].s - l.s) < 1.5) { kk = j; break; }
+      if (kk < 0) return;
+      lockRow[kk] = idx;
+    });
+
     // per-quarter court time rules (Equal time only)
     var rule = null, slotGroup = [], groups = [];
     slots.forEach(function (sl, k) {
@@ -530,9 +546,9 @@ var Engine = (function () {
     }
 
     if (game.mode === 'best') {
-      lineups = planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits);
+      lineups = planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits, lockRow);
     } else {
-      var res = planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule);
+      var res = planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule, lockRow);
       lineups = res.lineups; qual = res.qual; dev = res.dev;
     }
     var out = finish(slots, ids, lineups, played, cur);
@@ -551,7 +567,7 @@ var Engine = (function () {
   }
 
   /* ----- equal time ----- */
-  function planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule) {
+  function planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule, lockRow) {
     var cfg = game.cfg, N = ids.length, S = slots.length;
     var fairShare = C * totalLen(game.lens) / N;
     var factor = cfg.fairness === 'strong' ? 0.6 : cfg.fairness === 'gentle' ? 0.3 : 0;
@@ -573,7 +589,9 @@ var Engine = (function () {
       if (rule && rule.slotGroup[k] !== curGroup) { curGroup = rule.slotGroup[k]; gplay = curGroup === 0 ? rule.pb.slice() : new Array(N).fill(0); }
       var row = new Array(N).fill(0), pick = [];
       var pl = (k === 0 && opts.pinCurrent) ? null : lineupAt(opts.prev, slots[k].s);
-      if (k === 0 && opts.pinCurrent) {
+      if (lockRow[k]) {
+        pick = lockRow[k].slice();
+      } else if (k === 0 && opts.pinCurrent) {
         for (i = 0; i < N; i++) if (curOn[i]) pick.push(i);
       } else if (pl) {
         pl.forEach(function (pid) { var ix = ids.indexOf(pid); if (ix >= 0) pick.push(ix); });
@@ -588,7 +606,7 @@ var Engine = (function () {
         rest.sort(function (a, b) { return order(a, b, rem); });
         pick = pick.concat(rest.slice(0, C - pick.length));
       }
-      if (!(k === 0 && opts.pinCurrent) && limits[k] < C) {
+      if (!lockRow[k] && !(k === 0 && opts.pinCurrent) && limits[k] < C) {
         var prevIdx = [];
         for (i = 0; i < N; i++) if (k ? on[k - 1][i] : curOn[i]) prevIdx.push(i);
         var stay = pick.filter(function (x) { return prevIdx.indexOf(x) >= 0; });
@@ -644,8 +662,8 @@ var Engine = (function () {
         if (kk === 0) c += (opts.pinCurrent ? 1000 : startFlags[0] ? 0.15 : WC0) * changes;
         else c += WC * changes * changes;
         // players per sub: the usual number is preferred, more is discouraged strongly, fewer only lightly
-        if (usual != null && kk > 0 && !startFlags[kk]) c += changes < usual ? WLOW * (usual - changes) : WHIGH * (changes - usual);
-        if (changes > limits[kk] && !(kk === 0 && opts.pinCurrent)) { d = changes - limits[kk]; c += 300 * d * d; q += 300 * d * d; }
+        if (usual != null && kk > 0 && !startFlags[kk] && !lockRow[kk]) c += changes < usual ? WLOW * (usual - changes) : WHIGH * (changes - usual);
+        if (changes > limits[kk] && !lockRow[kk] && !(kk === 0 && opts.pinCurrent)) { d = changes - limits[kk]; c += 300 * d * d; q += 300 * d * d; }
         if (slots[kk].brk) for (ii = 0; ii < N; ii++) f[ii] = Math.max(0, f[ii] - slots[kk].brk * RECOVERY / E);
       }
       if (rule) {
@@ -679,9 +697,10 @@ var Engine = (function () {
       var iters = 7000;
       for (it = 0; it < iters; it++) {
         var a = lo + Math.floor(rnd() * span), b, ps = [], qs = [], p, q;
+        if (lockRow[a]) continue;
         if (rnd() < 0.55 && span > 1) {
           b = lo + Math.floor(rnd() * span);
-          if (a === b) continue;
+          if (a === b || lockRow[b]) continue;
           for (i = 0; i < N; i++) {
             if (on[a][i] && !on[b][i]) ps.push(i);
             else if (on[b][i] && !on[a][i]) qs.push(i);
@@ -715,7 +734,7 @@ var Engine = (function () {
   }
 
   /* ----- best players, sub only for fatigue ----- */
-  function planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits) {
+  function planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits, lockRow) {
     var N = ids.length, f = f0.slice(), i, k;
     var hgt = ids.map(function (id) { return (opts.height && opts.height[id]) || 3; });
     var useH = cfg.balanceHeight !== false && Math.max.apply(null, hgt) > Math.min.apply(null, hgt);
@@ -726,6 +745,7 @@ var Engine = (function () {
     function fresh(i) { return rat[i] * 1.0 - f[i] * 1.5; }
     for (k = 0; k < slots.length; k++) {
       var len = slots[k].len, dF = len / E;
+      if (lockRow && lockRow[k]) lineup = lockRow[k].slice();
       var inL = function (x) { return lineup.indexOf(x) >= 0; };
       var benchList = function () { var b = []; for (var x = 0; x < N; x++) if (!inL(x)) b.push(x); return b; };
       // fill empty spots with the best available
@@ -734,7 +754,7 @@ var Engine = (function () {
         lineup.push(b0[0]);
       }
       // tired players go off, best rested bench player comes on
-      var used = 0, lim = limits[k];
+      var used = 0, lim = (lockRow && lockRow[k]) ? 0 : limits[k];
       var tired = lineup.filter(function (x) { return f[x] + dF > 1.0001; })
         .sort(function (x, y) { return f[y] - f[x]; });
       tired.forEach(function (x) {
@@ -914,17 +934,36 @@ var Engine = (function () {
     var p = Engine.plan(tmp, 0, planOpts({ startBias: UI.startRate }));
     g.starters = (p.lineups[0] || g.present).slice(0, C);
   }
+  // Lineups the coach has chosen for upcoming changes. A lock is dropped once it no longer applies.
+  function validLocks(g) {
+    if (!g.manual || !g.manual.length) return [];
+    var st = g.status === 'live' ? Engine.derive(g, tauNow(g)).P : null;
+    g.manual = g.manual.filter(function (l) {
+      if (!st) return l.lineup.every(function (id) { return g.present.indexOf(id) >= 0; });
+      if (!l.lineup.every(function (id) { return st[id] && st[id].status === 'avail'; })) return false;
+      var on = Object.keys(st).filter(function (id) { return st[id].on; });
+      return !(on.length === l.lineup.length && l.lineup.every(function (id) { return st[id].on; }));
+    });
+    return g.manual;
+  }
+  function lockAt(g, s, now) {
+    return (g.manual || []).filter(function (l) { return now ? l.s <= s + 1.5 : Math.abs(l.s - s) < 1.5; })[0] || null;
+  }
   function previewPlan(g) {
     if (!g.present.length) return null;
     var C = Math.min(g.cfg.onCourt, g.present.length);
     var tmp = { cfg: g.cfg, lens: g.lens, present: g.present, mode: g.mode,
       events: g.starters.map(function (id) { return { t: 0, type: 'in', p: id }; }) };
-    return Engine.plan(tmp, 0, planOpts({ pinCurrent: g.starters.length === C }));
+    return Engine.plan(tmp, 0, planOpts({ pinCurrent: g.starters.length === C, locked: validLocks(g) }));
   }
   function replan(g, extra) {
     if (g.status !== 'live') return;
     var o = Object.assign({ prev: g._plan }, extra || {});
     if (o.fresh) o.prev = null;
+    o.locked = validLocks(g);
+    // while the coach has a later change set, nothing else changes before it
+    var tauR = tauNow(g);
+    if (o.locked.some(function (l) { return l.s > tauR + 1.5; })) o.pinCurrent = true;
     g._plan = Engine.plan(g, tauNow(g), planOpts(o));
   }
   // The planned sub has been made (on time or early), so treat that part of the plan as done and keep the rest,
@@ -968,6 +1007,7 @@ var Engine = (function () {
     if (early) g.lens[c.per] = Math.max(1, c.el); else c.el = g.lens[c.per];
     c.ended = true;
     g.events.push({ t: tauNow(g), type: 'brk', credit: Engine.breakCredit(g.cfg, c.per), per: c.per, grp: uid() });
+    g.manual = (g.manual || []).filter(function (l) { return l.s >= tauNow(g) - 1.5; });
     replan(g, { fresh: true }); save(); beep(2);
   }
   function nextPeriod(g, force) {
@@ -1066,6 +1106,43 @@ var Engine = (function () {
       if (d2.outs.length || d2.ins.length) return { now: false, seg: j, s: segs[j].s, per: segs[j].per, outs: d2.outs, ins: d2.ins, key: 'nx' + Math.round(segs[j].s) + d2.outs.join() + d2.ins.join() };
     }
     return null;
+  }
+  // the first change the planner suggests after the starting five
+  function setupFirstSub(g, pp) {
+    var C = Math.min(g.cfg.onCourt, g.present.length);
+    if (!pp || g.starters.length !== C || g.present.length <= C) return null;
+    for (var i = 0; i < pp.segments.length; i++) {
+      var sg = pp.segments[i], outs = g.starters.filter(function (x) { return sg.lineup.indexOf(x) < 0; }), ins = sg.lineup.filter(function (x) { return g.starters.indexOf(x) < 0; });
+      if (outs.length || ins.length) return { seg: i, s: sg.s, per: sg.per, outs: outs, ins: ins, lineup: sg.lineup, subsPer: pp.subsPer };
+    }
+    return null;
+  }
+  // Editor for the lineup after the next change. Pick exactly as many players as are on court.
+  function openManual(g, o) {
+    UI.m = { sel: {}, cur: o.cur, s: o.s, per: o.per, subsPer: o.subsPer, C: o.C, avail: o.avail, setup: !!o.setup };
+    o.lineup.forEach(function (id) { UI.m.sel[id] = 1; });
+    paintManual(false);
+  }
+  function paintManual(keepScroll) {
+    var m = UI.m, g = activeGame(), st = g.status === 'live' ? Engine.derive(g, tauNow(g)).P : {};
+    var picked = m.avail.filter(function (id) { return m.sel[id]; });
+    var offs = m.cur.filter(function (id) { return !m.sel[id]; }), ons = picked.filter(function (id) { return m.cur.indexOf(id) < 0; });
+    var ok = picked.length === m.C, lock = lockAt(g, m.s, !m.setup);
+    var h = '<h2>Choose the next lineup</h2><div class="muted">' + whenLabel(g, { per: m.per, s: m.s }) + '. Tap players to put them on or take them off. The planner builds the rest of the game around your choice.</div>';
+    h += '<div class="note" style="' + (ok ? '' : 'background:var(--bad-soft);color:var(--bad)') + '"><b>' + picked.length + ' of ' + m.C + ' picked</b>' +
+      (offs.length || ons.length ? '<br>' + (offs.length ? 'Off: ' + names(offs) : '') + (offs.length && ons.length ? ' · ' : '') + (ons.length ? 'On: ' + names(ons) : '') : '<br>No change from the current five.') + '</div>';
+    h += '<div class="stack" style="gap:8px">' + m.avail.slice().sort(function (a, b) { return (parseInt(pl(a).num, 10) || 0) - (parseInt(pl(b).num, 10) || 0); }).map(function (id) {
+      var p = pl(id), s = st[id], onNow = m.cur.indexOf(id) >= 0, sel = !!m.sel[id];
+      var meta = (s ? fmt(s.played) + ' played · ' + Math.round(Math.min(1, s.f) * 100) + '% fatigue' + (s.fouls ? ' · ' + s.fouls + ' fouls' : '') : (onNow ? 'Starting' : 'Bench'));
+      var chip = sel && !onNow ? '<span class="chip in">Coming on</span>' : !sel && onNow ? '<span class="chip out">Going off</span>' : sel ? '<span class="chip foul">Staying on</span>' : '<span></span>';
+      return '<button class="opt' + (sel ? ' best' : '') + '" data-act="mtog" data-id="' + id + '"><span class="num">' + esc(p.num) + '</span><span><b>' + esc(p.name) + '</b><br><span class="meta">' + meta + '</span></span>' + chip + '</button>';
+    }).join('') + '</div>';
+    h += '<button class="btn primary wide" data-act="msave"' + (ok ? '' : ' disabled') + '>Use this lineup</button>' +
+      (lock ? '<button class="btn wide" data-act="mclear">Go back to the planner\'s suggestion</button>' : '') +
+      '<button class="btn wide" data-act="closesheet">Cancel</button>';
+    var el = document.querySelector('.sheet'), y = keepScroll && el ? el.scrollTop : 0;
+    openSheet(h);
+    el = document.querySelector('.sheet'); if (keepScroll && el) el.scrollTop = y;
   }
   function whenLabel(g, pd) {
     var per = pd.per, start = Engine.periodStart(g.lens, per), L = g.lens[per];
@@ -1256,6 +1333,13 @@ var Engine = (function () {
     if (g.present.length < g.cfg.onCourt) h += '<div class="note">Only ' + g.present.length + ' players. You will play short-handed with everyone on court the whole game.</div>';
 
     var pp = previewPlan(g);
+    var fs = setupFirstSub(g, pp);
+    if (fs) {
+      h += '<div class="banner next"><div class="bh"><span>First sub · ' + whenLabel(g, fs) + (lockAt(g, fs.s, false) ? ' · your choice' : '') + '</span></div><div class="bl">' +
+        (fs.outs.length ? '<em>OFF</em><span>' + names(fs.outs) + '</span>' : '') + (fs.ins.length ? '<em>ON</em><span>' + names(fs.ins) + '</span>' : '') +
+        '</div><div class="bb"><button class="btn small grow" data-act="msetup">' + (lockAt(g, fs.s, false) ? 'Edit your choice' : 'Choose different players') + '</button>' +
+        (lockAt(g, fs.s, false) ? '<button class="btn small" data-act="mclear" data-setup="1">Use suggestion</button>' : '') + '</div></div>';
+    }
     if (pp && g.present.length > g.cfg.onCourt && g.mode === 'equal') {
       var v = Object.keys(pp.proj).map(function (k) { return pp.proj[k]; }), spread = Math.max.apply(null, v) - Math.min.apply(null, v);
       h += '<div class="card"><b>Projected: ' + fmt(Math.min.apply(null, v)) + ' to ' + fmt(Math.max.apply(null, v)) + ' minutes each</b><br><span class="small muted">' +
@@ -1320,17 +1404,19 @@ var Engine = (function () {
         (five ? '<div class="five">' + five.slice().sort(function (a, b) { return (parseInt(pl(a).num, 10) || 0) - (parseInt(pl(b).num, 10) || 0); }).map(function (id) { return '<span><b>' + esc(pl(id).num) + '</b> ' + esc(pl(id).name) + '</span>'; }).join('') + '</div>' : '') +
         (pd && pd.now ? '<div class="bl">' + (pd.outs.length ? '<em>OFF</em><span>' + names(pd.outs) + '</span>' : '') + (pd.ins.length ? '<em>ON</em><span>' + names(pd.ins) + '</span>' : '') +
           '</div><div class="bb"><button class="btn solid grow" data-act="makesubs">Use this five</button><button class="btn" data-act="skip">Keep current five</button></div>'
-          : '<div class="muted small">Same five as now. Tap a player to change it yourself.</div>') + '</div>';
+          : '<div class="muted small">Same five as now. Tap a player to change it yourself.</div>') +
+        '<div class="bb"><button class="btn small grow" data-act="mchange">' + (lockAt(g, nextStart, false) ? 'Edit your five' : 'Choose a different five') + '</button></div></div>';
     } else if (pd) {
       var tag = g.mode === 'best' ? 'Fatigue sub' : 'Sub';
       if (pd.now) {
-        h += '<div class="banner now"><div class="bh"><span>' + tag + ' now</span></div><div class="bl">' +
+        h += '<div class="banner now"><div class="bh"><span>' + tag + ' now' + (lockAt(g, pd.s, true) ? ' · your choice' : '') + '</span></div><div class="bl">' +
           (pd.outs.length ? '<em>OFF</em><span>' + names(pd.outs) + '</span>' : '') + (pd.ins.length ? '<em>ON</em><span>' + names(pd.ins) + '</span>' : '') +
-          '</div><div class="bb"><button class="btn solid grow" data-act="makesubs">Make these subs</button><button class="btn" data-act="skip">Not now</button></div></div>';
+          '</div><div class="bb"><button class="btn solid grow" data-act="makesubs">Make these subs</button><button class="btn" data-act="skip">Not now</button></div><div class="bb"><button class="btn small grow" data-act="mchange">' + (lockAt(g, pd.s, true) ? 'Edit your choice' : 'Choose different players') + '</button></div></div>';
       } else {
-        h += '<div class="banner next"><div class="bh"><span>Next sub · ' + whenLabel(g, pd) + '</span><span data-cd>in ' + fmt(pd.s - M.tau) + '</span></div><div class="bl">' +
+        h += '<div class="banner next"><div class="bh"><span>Next sub · ' + whenLabel(g, pd) + (lockAt(g, pd.s, false) ? ' · your choice' : '') + '</span><span data-cd>in ' + fmt(pd.s - M.tau) + '</span></div><div class="bl">' +
           (pd.outs.length ? '<em>OFF</em><span>' + names(pd.outs) + '</span>' : '') + (pd.ins.length ? '<em>ON</em><span>' + names(pd.ins) + '</span>' : '') +
-          '</div>' + (pd.per > per ? '<div class="small muted">These changes are made at the break.</div>' : '<div class="bb"><button class="btn solid" data-act="makesubs">Sub early</button></div>') + '</div>';
+          '</div>' + (pd.per > per ? '<div class="small muted">These changes are made at the break.</div>' : '<div class="bb"><button class="btn solid" data-act="makesubs">Sub early</button></div>') +
+          '<div class="bb"><button class="btn small grow" data-act="mchange">' + (lockAt(g, pd.s, false) ? 'Edit your choice' : 'Choose different players') + '</button></div></div>';
       }
     } else {
       var avail = all.filter(function (p) { return p.status === 'avail'; }).length;
@@ -1739,12 +1825,35 @@ var Engine = (function () {
     }).join('') + '</div>';
     openSheet(h);
   }
+  // Combine another device's data with this one. Nothing already here is deleted.
+  // Same team or player id: this device's version is kept. Same game id: the finished version, or the one with more recorded events, wins.
+  function mergeData(inc) {
+    var r = { teams: 0, players: 0, games: 0, updated: 0 };
+    inc.teams.forEach(function (it) {
+      var lt = DB.teams.filter(function (t) { return t.id === it.id; })[0];
+      if (!lt) { DB.teams.push(it); r.teams++; r.players += it.players.length; return; }
+      it.players.forEach(function (ip) {
+        if (!lt.players.some(function (p) { return p.id === ip.id; })) { lt.players.push(ip); r.players++; }
+      });
+    });
+    inc.games.forEach(function (ig) {
+      var lg = DB.games.filter(function (g) { return g.id === ig.id; })[0];
+      if (!lg) { DB.games.push(ig); r.games++; return; }
+      var better = (ig.status === 'done' && lg.status !== 'done') || (ig.status === lg.status && ig.events.length > lg.events.length) || (ig.status === 'done' && lg.status === 'done' && !lg.awards && ig.awards);
+      if (better) { DB.games[DB.games.indexOf(lg)] = ig; r.updated++; }
+    });
+    return r;
+  }
   function openBackup() {
     var json = JSON.stringify(DB, function (k, v) { return k === '_plan' ? undefined : v; });
     openSheet('<h2>Back up</h2><div class="muted">Copy this text and keep it somewhere safe, such as Notes. To restore, paste it back below.</div>' +
       '<textarea id="bk-out" readonly>' + esc(json) + '</textarea><div class="grid2"><button class="btn" data-act="copybk">Copy</button>' +
       (navigator.share ? '<button class="btn" data-act="sharebk">Share</button>' : '<span></span>') + '</div>' +
-      '<div class="lbl">Restore</div><textarea id="bk-in" placeholder="Paste a backup here"></textarea><button class="btn danger wide" data-act="restorebk">Restore from pasted backup</button>');
+      '<div class="lbl">Bring in data from another device</div><textarea id="bk-in" placeholder="Paste a backup here"></textarea>' +
+      '<button class="btn primary wide" data-act="mergebk">Merge into this device</button>' +
+      '<span class="small muted">Adds any games and players this device is missing and keeps everything already here. Use this to move data between your phones and iPad.</span>' +
+      '<button class="btn danger wide" data-act="restorebk">Replace everything with this backup</button>' +
+      '<span class="small muted">Only for a new device, or to go back to an earlier backup. It deletes what is on this device now.</span>');
   }
 
 
@@ -1968,9 +2077,43 @@ var Engine = (function () {
       var evs = [];
       pd.outs.forEach(function (id) { evs.push({ type: 'out', p: id }); });
       pd.ins.forEach(function (id) { evs.push({ type: 'in', p: id }); });
-      rec(g, evs); advancePlan(g, pd); save(); showToast('Subs made', true);
+      rec(g, evs); g.manual = (g.manual || []).filter(function (l) { return l.s > Math.max(pd.s, tauNow(g)) + 1.5; }); advancePlan(g, pd); save(); showToast('Subs made', true);
     },
-    skip: function () { var g = activeGame(); replan(g, { pinCurrent: true }); save(); render(); },
+    skip: function () {
+      var g = activeGame(), tau = tauNow(g);
+      g.manual = (g.manual || []).filter(function (l) { return l.s > tau + 1.5; });
+      replan(g, { pinCurrent: true }); save(); render();
+    },
+    mchange: function () {
+      var g = activeGame(), M = liveModel(g), pd = M.pd, tgt = pd, seg = null, cur = [];
+      if (!tgt && inBreak(g) && g._plan && g._plan.segments[0]) { var s0 = g._plan.segments[0]; tgt = { seg: 0, s: s0.s, per: s0.per }; }
+      if (!tgt) return;
+      seg = g._plan.segments[tgt.seg]; if (!seg) return;
+      Object.keys(M.st.P).forEach(function (id) { if (M.st.P[id].on) cur.push(id); });
+      var avail = Object.keys(M.st.P).filter(function (id) { return M.st.P[id].status === 'avail'; });
+      openManual(g, { lineup: seg.lineup, cur: cur, s: tgt.s, per: tgt.per, subsPer: g._plan.subsPer, C: Math.min(g.cfg.onCourt, avail.length), avail: avail });
+    },
+    msetup: function () {
+      var g = activeGame(), fs = setupFirstSub(g, previewPlan(g)); if (!fs) return;
+      openManual(g, { lineup: fs.lineup, cur: g.starters.slice(), s: fs.s, per: fs.per, subsPer: fs.subsPer, C: Math.min(g.cfg.onCourt, g.present.length), avail: g.present.slice(), setup: true });
+    },
+    mtog: function (d) { UI.m.sel[d.id] = !UI.m.sel[d.id]; paintManual(true); },
+    msave: function () {
+      var g = activeGame(), m = UI.m; if (!m) return;
+      var lineup = m.avail.filter(function (id) { return m.sel[id]; }); if (lineup.length !== m.C) return;
+      g.manual = (g.manual || []).filter(function (l) { return Math.abs(l.s - m.s) > 1.5; });
+      g.manual.push({ s: m.s, per: m.per, lineup: lineup, subsPer: m.subsPer });
+      if (g.status === 'live') replan(g);
+      save(); closeSheet(); render(); showToast('Your lineup is set. The planner works around it.');
+    },
+    mclear: function (d) {
+      var g = activeGame(), m = UI.m, setup = !!(d && d.setup), t;
+      if (setup) { var fs = setupFirstSub(g, previewPlan(g)); t = fs ? fs.s : null; } else { if (!m) return; t = m.s; setup = m.setup; }
+      if (t == null) return;
+      g.manual = (g.manual || []).filter(function (l) { return setup ? Math.abs(l.s - t) > 1.5 : l.s > t + 1.5; });
+      if (g.status === 'live') replan(g);
+      save(); closeSheet(); render();
+    },
     sound: function (d) { DB.sound = d.v === '1'; save(); render(); if (DB.sound) { ensureAudio(); beep(1); } },
     addp: function () { openPlayerEdit(null); },
     editp: function (d) { openPlayerEdit(d.id); },
@@ -2026,6 +2169,13 @@ var Engine = (function () {
       try { navigator.clipboard.writeText(ta.value).then(function () { showToast('Copied'); }, fallback); } catch (e) { fallback(); }
     },
     sharebk: function () { try { navigator.share({ title: 'Sub planner backup', text: $('#bk-out').value }); } catch (e) { } },
+    mergebk: function () {
+      var t = $('#bk-in').value.trim(), inc;
+      try { inc = migrate(JSON.parse(t)); if (!inc) throw 0; } catch (e) { showToast('That does not look like a backup'); return; }
+      var r = mergeData(inc);
+      recomputeOwe(); save(); closeSheet(); render();
+      showToast(r.games || r.players || r.teams ? 'Merged: ' + r.games + ' new ' + (r.games === 1 ? 'game' : 'games') + ', ' + r.players + ' new ' + (r.players === 1 ? 'player' : 'players') + (r.teams ? ', ' + r.teams + ' new ' + (r.teams === 1 ? 'team' : 'teams') : '') + (r.updated ? ', ' + r.updated + ' updated' : '') : 'Nothing new in that backup');
+    },
     restorebk: function () {
       var t = $('#bk-in').value.trim();
       try { var d = JSON.parse(t); if (!d || !(d.teams || d.team) || !d.games) throw 0; } catch (e) { showToast('That does not look like a backup'); return; }
