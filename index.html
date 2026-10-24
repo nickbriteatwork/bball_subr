@@ -240,11 +240,9 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 .court .spot { border: 2px dashed var(--ink2); background: transparent; opacity: .55; }
 .court .spot.target { opacity: 1; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .tok { border-radius: 50%; border: 2px solid var(--ink); color: #fff; display: flex; align-items: center; justify-content: center; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; font-family: var(--head); }
-.tok b { font-size: 20px; font-size: 5.6cqw; line-height: 1; font-weight: 700; pointer-events: none; }
-.tok i { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 2px; font-style: normal; font-family: var(--body); font-weight: 700; font-size: 17px; font-size: 5.4cqw; line-height: 1.15; color: var(--ink); background: color-mix(in srgb, var(--surface) 88%, transparent); border-radius: 6px; padding: 0 6px; white-space: nowrap; max-width: 27cqw; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-.tok.tall { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-.tok.mid { background: var(--nav); border-color: var(--nav); }
-.tok.short { background: #1F8A8A; border-color: #1F8A8A; }
+.tok b { font-size: 30px; font-size: 9.2cqw; line-height: 1; font-weight: 700; pointer-events: none; }
+.tok i { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 2px; font-style: normal; font-family: var(--body); font-weight: 700; font-size: 22px; font-size: 7.8cqw; line-height: 1.15; color: var(--ink); background: color-mix(in srgb, var(--surface) 90%, transparent); border-radius: 8px; padding: 0 8px; white-space: nowrap; max-width: 28cqw; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.tok { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .tok.sel { box-shadow: 0 0 0 3px var(--surface), 0 0 0 6px var(--ink); }
 .tok.drag { z-index: 5; opacity: .9; cursor: grabbing; box-shadow: 0 6px 16px rgba(0,0,0,.35); }
 .tray { display: flex; flex-wrap: wrap; gap: 26px 14px; padding: 4px 4px 22px; }
@@ -268,6 +266,21 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 .srow .rate2 { align-items: flex-end; margin: 0; }
 .legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 8px 0 4px; font-size: 12px; color: var(--ink2); }
 .legend span { margin-right: 6px; }
+
+/* drawing on the court */
+:root { --d-blue: #1F5FE0; --d-pink: #D6247A; --d-green: #138A45; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --d-blue: #6EA2FF; --d-pink: #FF5CA8; --d-green: #43D17F; } }
+:root[data-theme="dark"] { --d-blue: #6EA2FF; --d-pink: #FF5CA8; --d-green: #43D17F; }
+.court .drawlayer { z-index: 4; pointer-events: none; }
+.court.drawing .drawlayer { pointer-events: auto; touch-action: none; cursor: crosshair; }
+.court.drawing .tok { pointer-events: none; }
+.ds { fill: none; stroke-width: .9; stroke-linecap: round; stroke-linejoin: round; }
+.st-blue { stroke: var(--d-blue); } .st-pink { stroke: var(--d-pink); } .st-green { stroke: var(--d-green); } .st-ink { stroke: var(--ink); }
+.drawtools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; padding: 10px 12px; }
+.dc { width: 38px; height: 38px; border-radius: 50%; border: 3px solid var(--surface); box-shadow: 0 0 0 1.5px var(--line); padding: 0; }
+.dc.on { box-shadow: 0 0 0 3px var(--ink); }
+.dc-blue { background: var(--d-blue); } .dc-pink { background: var(--d-pink); } .dc-green { background: var(--d-green); } .dc-ink { background: var(--ink); }
+.drawtools .btn.small { min-height: 38px; }
 
 body{padding-top:calc(12px + env(safe-area-inset-top,0px))}
 [hidden]{display:none!important}</style>
@@ -1943,7 +1956,12 @@ var Engine = (function () {
       '<g fill="none" stroke="var(--ink)" stroke-opacity=".5" stroke-width=".45"><rect x="0" y="0" width="50" height="94"/><path d="M0 47h50"/><circle cx="25" cy="47" r="6"/>' +
       '<g>' + half() + '</g><g transform="translate(0 94) scale(1 -1)">' + half() + '</g></g></svg>';
   }
-  function tokClass(id) { var h = heightOf(id); return h >= 4 ? 'tall' : h <= 2 ? 'short' : 'mid'; }
+  function tokClass(id) { return ''; }
+  var DCOLORS = [['blue', 'Blue'], ['pink', 'Pink'], ['green', 'Green'], ['ink', 'Black / white']];
+  function pathD(p) {
+    if (p.length === 1) return 'M' + p[0][0] + ' ' + p[0][1] + 'l0.01 0';
+    return 'M' + p.map(function (q) { return q[0] + ' ' + q[1]; }).join('L');
+  }
   function courtView(g) {
     var h = '<div class="appbar"><h1>Court</h1>' + teamPill() + '</div>';
     if (!g) return h + '<div class="card">Set up a game to arrange where your players stand. The court shows the five on the floor, and it follows your substitutions.</div>';
@@ -1953,15 +1971,59 @@ var Engine = (function () {
     if (!g.form) g.form = defaultForm(lineup);
     syncForm(g.form, lineup);
     if (JSON.stringify(g.form) !== before) save();
-    var out = h + '<div class="stack"><div class="card small muted">Your end is the bottom half. Drag players anywhere on the court, and up into the top half to show a press. A substitute takes the spot of the player they replace. Orange players are taller, teal are shorter.</div>';
-    out += '<div class="court" id="court">' + courtPaint();
+    var out = h + '<div class="stack"><div class="card small muted">Your end is the bottom half. Drag players anywhere on the court, and up into the top half to show a press. A substitute takes the spot of the player they replace. Tap Draw to sketch plays with your finger.' + (UI.drawOn ? ' Players are locked while you draw.' : '') + '</div>';
+    out += '<div class="court' + (UI.drawOn ? ' drawing' : '') + '" id="court">' + courtPaint();
     Object.keys(g.form.pos).forEach(function (id) {
       var p = pl(id), c = g.form.pos[id];
       out += '<button class="tok ' + tokClass(id) + '" data-pid="' + id + '" style="left:' + ((c.x + 2) / 54 * 100).toFixed(2) + '%;top:' + ((c.y + 2) / 98 * 100).toFixed(2) + '%"><b>' + esc(p.num) + '</b><i>' + esc(p.name) + '</i></button>';
     });
-    out += '</div><button class="btn wide" data-act="creset">Reset to the default</button><div class="small muted" style="margin-top:-6px">Default: the three tallest in a row near your basket, the other two in a row at the top of the key.</div></div>';
+    out += '<svg class="drawlayer" viewBox="-2 -2 54 98" preserveAspectRatio="none"><rect x="-2" y="-2" width="54" height="98" fill="transparent" pointer-events="all"/>' +
+      (g.draw || []).map(function (st) { return '<path class="ds st-' + st.c + '" d="' + pathD(st.p) + '"/>'; }).join('') + '</svg>';
+    out += '</div>';
+    var has = (g.draw || []).length > 0;
+    if (UI.drawOn) {
+      out += '<div class="card drawtools">' + DCOLORS.map(function (c) {
+        return '<button class="dc dc-' + c[0] + (UI.drawColor === c[0] ? ' on' : '') + '" data-act="dcolor" data-v="' + c[0] + '" aria-label="' + c[1] + '"></button>';
+      }).join('') + '<button class="btn small" data-act="dundo"' + (has ? '' : ' disabled') + '>Undo</button><button class="btn small" data-act="dclear"' + (has ? '' : ' disabled') + '>Clear</button><button class="btn small dark" data-act="drawoff">Done</button></div></div>';
+    } else {
+      out += '<div class="grid2"><button class="btn primary" data-act="drawon">Draw</button><button class="btn" data-act="creset">Reset to the default</button></div>' +
+        (has ? '<button class="btn small wide" data-act="dclear">Clear drawing</button>' : '') +
+        '<div class="small muted">Default: the three tallest in a row near your basket, the other two in a row at the top of the key.</div></div>';
+    }
     return out;
   }
+  var drawing = null;
+  function drawPt(e) {
+    var r = document.getElementById('court').getBoundingClientRect();
+    return [Math.round(((e.clientX - r.left) / r.width * 54 - 2) * 10) / 10, Math.round(((e.clientY - r.top) / r.height * 98 - 2) * 10) / 10];
+  }
+  document.addEventListener('pointerdown', function (e) {
+    var el = e.target.closest && e.target.closest('.court.drawing .drawlayer');
+    if (!el || !UI.drawOn) return;
+    var g = activeGame(); if (!g) return;
+    e.preventDefault();
+    g.draw = g.draw || [];
+    var st = { c: UI.drawColor || 'blue', p: [drawPt(e)] };
+    g.draw.push(st);
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('class', 'ds st-' + st.c); path.setAttribute('d', pathD(st.p));
+    el.appendChild(path);
+    drawing = { id: e.pointerId, st: st, path: path };
+    try { el.setPointerCapture(e.pointerId); } catch (x) { }
+  });
+  document.addEventListener('pointermove', function (e) {
+    if (!drawing || e.pointerId !== drawing.id) return;
+    var pt = drawPt(e), last = drawing.st.p[drawing.st.p.length - 1];
+    if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) < 0.35) return;
+    drawing.st.p.push(pt); drawing.path.setAttribute('d', pathD(drawing.st.p));
+  });
+  function endDraw(e) {
+    if (!drawing || e.pointerId !== drawing.id) return;
+    drawing = null; save();
+    var u = $('[data-act=dundo]'), c = $('[data-act=dclear]'); if (u) u.disabled = false; if (c) c.disabled = false;
+  }
+  document.addEventListener('pointerup', endDraw);
+  document.addEventListener('pointercancel', endDraw);
   var drag = null;
   document.addEventListener('pointerdown', function (e) {
     var t = e.target.closest && e.target.closest('.court .tok'); if (!t) return;
@@ -2030,7 +2092,7 @@ var Engine = (function () {
       DB.teams = DB.teams.filter(function (t) { return t.id !== id; });
       DB.teamId = DB.teams[0].id; recomputeOwe(); save(); closeSheet(); UI.tab = 'game'; render();
     },
-    tab: function (d) { UI.tab = d.v; try { sessionStorage.setItem('sp-tab', d.v); } catch (e) { } window.scrollTo(0, 0); render(); if (d.v === 'court') window.scrollTo(0, document.body.scrollHeight); },
+    tab: function (d) { UI.tab = d.v; if (d.v !== 'court') UI.drawOn = false; try { sessionStorage.setItem('sp-tab', d.v); } catch (e) { } window.scrollTo(0, 0); render(); if (d.v === 'court') window.scrollTo(0, document.body.scrollHeight); },
     closesheet: function () { closeSheet(); },
     newgame: function () { newGame(); UI.tab = 'game'; render(); },
     discard: function () { confirmSheet('Discard this game?', 'The setup will be removed.', 'discard2', '', 'Discard game'); },
@@ -2183,6 +2245,12 @@ var Engine = (function () {
     },
     box: function (d) { openBox(d.id); },
     stab: function (d) { UI.stab = d.v; render(); },
+    drawon: function () { UI.drawOn = true; if (!UI.drawColor) UI.drawColor = 'blue'; render(); },
+    drawoff: function () { UI.drawOn = false; render(); },
+    dcolor: function (d) { UI.drawColor = d.v; render(); },
+    dundo: function () { var g = activeGame(); if (g && g.draw && g.draw.length) { g.draw.pop(); save(); render(); } },
+    dclear: function () { confirmSheet('Clear the drawing?', 'All the lines on the court are removed. The players stay where they are.', 'dclear2', '', 'Clear drawing'); },
+    dclear2: function () { var g = activeGame(); if (g) { g.draw = []; save(); } closeSheet(); render(); },
     creset: function () { var g = activeGame(); g.form = defaultForm(courtLineup(g)); save(); render(); },
     teampt: function (d) {
       UI.awardTeam = d.v === '1';
