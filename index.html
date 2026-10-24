@@ -241,7 +241,7 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 .court .spot.target { opacity: 1; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .tok { border-radius: 50%; border: 2px solid var(--ink); color: #fff; display: flex; align-items: center; justify-content: center; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; font-family: var(--head); }
 .tok b { font-size: 20px; font-size: 5.6cqw; line-height: 1; font-weight: 700; pointer-events: none; }
-.tok i { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 1px; font-style: normal; font-family: var(--body); font-weight: 600; font-size: 11px; font-size: 2.9cqw; line-height: 1.1; color: var(--ink); background: color-mix(in srgb, var(--surface) 80%, transparent); border-radius: 4px; padding: 0 3px; white-space: nowrap; max-width: 17cqw; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.tok i { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 2px; font-style: normal; font-family: var(--body); font-weight: 700; font-size: 17px; font-size: 5.4cqw; line-height: 1.15; color: var(--ink); background: color-mix(in srgb, var(--surface) 88%, transparent); border-radius: 6px; padding: 0 6px; white-space: nowrap; max-width: 27cqw; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .tok.tall { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .tok.mid { background: var(--nav); border-color: var(--nav); }
 .tok.short { background: #1F8A8A; border-color: #1F8A8A; }
@@ -1865,16 +1865,38 @@ var Engine = (function () {
     });
     return r;
   }
+  function countsOf(d) {
+    var pls = 0, done = 0, live = 0;
+    d.teams.forEach(function (t) { pls += t.players.filter(function (p) { return !p.archived; }).length; });
+    d.games.forEach(function (g) { if (g.status === 'done') done++; else live++; });
+    function n(k, one, many) { return k + ' ' + (k === 1 ? one : many); }
+    return n(d.teams.length, 'team', 'teams') + ', ' + n(pls, 'player', 'players') + ', ' + n(done, 'finished game', 'finished games') + (live ? ', ' + n(live, 'game in progress', 'games in progress') : '');
+  }
+  function updateBackupSummary() {
+    var box = $('#bk-sum'), ta = $('#bk-in'); if (!box || !ta) return;
+    var t = ta.value.trim(), here = '<br><span class="small">This device now: ' + countsOf(DB) + '.</span>';
+    box.className = 'note';
+    if (!t) { box.innerHTML = 'Paste a backup to see what is in it.' + here; return; }
+    var d = null;
+    try { d = migrate(JSON.parse(t)); } catch (e) { d = null; }
+    if (!d) { box.className = 'note bad'; box.innerHTML = 'That does not look like a backup. Copy it again from the other device.' + here; return; }
+    var empty = !d.teams.some(function (tm) { return tm.players.length; });
+    if (empty) box.className = 'note bad';
+    box.innerHTML = '<b>This backup has:</b> ' + countsOf(d) + '.' + (empty ? '<br>It has no players, so it is probably from the empty copy of the app. Copy it from the device that has your team.' : '') + here;
+  }
+  document.addEventListener('input', function (e) { if (e.target && e.target.id === 'bk-in') updateBackupSummary(); });
   function openBackup() {
     var json = JSON.stringify(DB, function (k, v) { return k === '_plan' ? undefined : v; });
     openSheet('<h2>Back up</h2><div class="muted">Copy this text and keep it somewhere safe, such as Notes. To restore, paste it back below.</div>' +
       '<textarea id="bk-out" readonly>' + esc(json) + '</textarea><div class="grid2"><button class="btn" data-act="copybk">Copy</button>' +
       (navigator.share ? '<button class="btn" data-act="sharebk">Share</button>' : '<span></span>') + '</div>' +
       '<div class="lbl">Bring in data from another device</div><textarea id="bk-in" placeholder="Paste a backup here"></textarea>' +
+      '<div class="note" id="bk-sum"></div>' +
       '<button class="btn primary wide" data-act="mergebk">Merge into this device</button>' +
       '<span class="small muted">Adds any games and players this device is missing and keeps everything already here. Use this to move data between your phones and iPad.</span>' +
       '<button class="btn danger wide" data-act="restorebk">Replace everything with this backup</button>' +
       '<span class="small muted">Only for a new device, or to go back to an earlier backup. It deletes what is on this device now.</span>');
+    updateBackupSummary();
   }
 
 
@@ -2193,6 +2215,8 @@ var Engine = (function () {
     mergebk: function () {
       var t = $('#bk-in').value.trim(), inc;
       try { inc = migrate(JSON.parse(t)); if (!inc) throw 0; } catch (e) { showToast('That does not look like a backup'); return; }
+      var blankHere = !DB.games.length && DB.teams.every(function (t) { return !t.players.length; });
+      if (blankHere) { var snd = DB.sound; DB = inc; DB.sound = snd; save(); recomputeOwe(); closeSheet(); render(); showToast('This device was empty, so the backup was loaded as it is'); return; }
       var r = mergeData(inc);
       recomputeOwe(); save(); closeSheet(); render();
       showToast(r.games || r.players || r.teams ? 'Merged: ' + r.games + ' new ' + (r.games === 1 ? 'game' : 'games') + ', ' + r.players + ' new ' + (r.players === 1 ? 'player' : 'players') + (r.teams ? ', ' + r.teams + ' new ' + (r.teams === 1 ? 'team' : 'teams') : '') + (r.updated ? ', ' + r.updated + ' updated' : '') : 'Nothing new in that backup');
