@@ -272,6 +272,8 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --d-blue: #6EA2FF; --d-pink: #FF5CA8; --d-green: #43D17F; } }
 :root[data-theme="dark"] { --d-blue: #6EA2FF; --d-pink: #FF5CA8; --d-green: #43D17F; }
 .court .drawlayer { z-index: 4; pointer-events: none; }
+.court .drawlayer .dhit, .court .drawlayer path { pointer-events: none; }
+.court.drawing .drawlayer .dhit { pointer-events: all; }
 .court.drawing .drawlayer { pointer-events: auto; touch-action: none; cursor: crosshair; }
 .court.drawing .tok { pointer-events: none; }
 .ds { fill: none; stroke-width: .9; stroke-linecap: round; stroke-linejoin: round; }
@@ -1977,7 +1979,7 @@ var Engine = (function () {
       var p = pl(id), c = g.form.pos[id];
       out += '<button class="tok ' + tokClass(id) + '" data-pid="' + id + '" style="left:' + ((c.x + 2) / 54 * 100).toFixed(2) + '%;top:' + ((c.y + 2) / 98 * 100).toFixed(2) + '%"><b>' + esc(p.num) + '</b><i>' + esc(p.name) + '</i></button>';
     });
-    out += '<svg class="drawlayer" viewBox="-2 -2 54 98" preserveAspectRatio="none"><rect x="-2" y="-2" width="54" height="98" fill="transparent" pointer-events="all"/>' +
+    out += '<svg class="drawlayer" viewBox="-2 -2 54 98" preserveAspectRatio="none"><rect class="dhit" x="-2" y="-2" width="54" height="98" fill="transparent"/>' +
       (g.draw || []).map(function (st) { return '<path class="ds st-' + st.c + '" d="' + pathD(st.p) + '"/>'; }).join('') + '</svg>';
     out += '</div>';
     var has = (g.draw || []).length > 0;
