@@ -570,6 +570,11 @@ var Engine = (function () {
     });
     var startFlags = slots.map(function (sl) { return Math.abs(sl.s - periodStart(game.lens, sl.per)) < 1; });
 
+    // players who came on at the most recent change (a planned sub or a forced one). They should not be the next ones taken off.
+    var lastIn = 0, fid;
+    for (fid in P) if (P[fid].since > lastIn) lastIn = P[fid].since;
+    var fresh0 = ids.map(function (i) { var q = P[i]; return (cfg.noQuickOff !== false && q.on && lastIn > 0 && Math.abs(q.since - lastIn) < 1.5) ? 1 : 0; });
+
     // lineups the coach has fixed for specific changes, matched to the slot that starts at that time
     var lockRow = slots.map(function () { return null; });
     (opts.locked || []).forEach(function (l) {
@@ -602,9 +607,9 @@ var Engine = (function () {
     }
 
     if (game.mode === 'best') {
-      lineups = planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits, lockRow);
+      lineups = planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits, lockRow, fresh0, startFlags);
     } else {
-      var res = planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule, lockRow);
+      var res = planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule, lockRow, fresh0);
       lineups = res.lineups; qual = res.qual; dev = res.dev;
     }
     var out = finish(slots, ids, lineups, played, cur);
@@ -623,7 +628,7 @@ var Engine = (function () {
   }
 
   /* ----- equal time ----- */
-  function planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule, lockRow) {
+  function planEqual(game, tau, opts, A, ids, rat, f0, curOn, slots, R, C, E, limits, startFlags, rule, lockRow, fresh0) {
     var cfg = game.cfg, N = ids.length, S = slots.length;
     var fairShare = C * totalLen(game.lens) / N;
     var factor = cfg.fairness === 'strong' ? 0.6 : cfg.fairness === 'gentle' ? 0.3 : 0;
@@ -695,6 +700,7 @@ var Engine = (function () {
     // priorities: court time (quota) first, then skill mix, then who has started least, then height mix
     var usual = cfg.usualSwap != null ? Math.min(cfg.usualSwap, Math.max(1, Math.min(C, cfg.maxSwap || 5))) : null, lastQ = 0, lastDev = 0;
     var WLOW = 0.6, WHIGH = 6;
+    var noQuick = cfg.noQuickOff !== false, WQH = 300, WQS = 150;
     var WF = 40, WS = 4, WB = 0.5, WH = 0.008, WST = 2.5, WC = 0.03, WC0 = 8;
     function cost(o) {
       var c = 0, q = 0, tot = new Array(N).fill(0), f = f0.slice(), bs = bs0.slice(), kk, ii, d;
@@ -712,6 +718,15 @@ var Engine = (function () {
             f[ii] = Math.max(0, f[ii] - len * RECOVERY / E); bs[ii] += len;
             if (bs[ii] > maxBench) { d = (bs[ii] - maxBench) / 60; c += WS * d * d; q += WS * d * d; }
           }
+        }
+        // someone who has just come on is not the next one taken off. At a quarter or half it is only a strong preference.
+        if (noQuick && !lockRow[kk] && !(kk === 0 && opts.pinCurrent)) {
+          var qv = 0;
+          for (ii = 0; ii < N; ii++) {
+            if (row[ii]) continue;
+            if (kk === 0 ? fresh0[ii] : (o[kk - 1][ii] && !(kk > 1 ? o[kk - 2][ii] : curOn[ii]))) qv++;
+          }
+          if (qv) { if (startFlags[kk]) c += WQS * qv; else { c += WQH * qv; q += WQH * qv; } }
         }
         if (useBal) { d = sum / C - M; c += WB * (len / 60) * d * d; }
         if (useH) { d = hsum - hTarget; c += WH * (len / 60) * d * d; }
@@ -750,7 +765,7 @@ var Engine = (function () {
     var lo = opts.pinCurrent ? 1 : 0, span = S - lo;
     if (span > 0) {
       var rnd = rng(1234 + S * 31 + N), best = cost(on), it;
-      var iters = 7000;
+      var iters = 9000;
       for (it = 0; it < iters; it++) {
         var a = lo + Math.floor(rnd() * span), b, ps = [], qs = [], p, q;
         if (lockRow[a]) continue;
@@ -790,7 +805,7 @@ var Engine = (function () {
   }
 
   /* ----- best players, sub only for fatigue ----- */
-  function planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits, lockRow) {
+  function planBest(cfg, slots, ids, rat, f0, curOn, C, E, opts, limits, lockRow, fresh0, startFlags) {
     var N = ids.length, f = f0.slice(), i, k;
     var hgt = ids.map(function (id) { return (opts.height && opts.height[id]) || 3; });
     var useH = cfg.balanceHeight !== false && Math.max.apply(null, hgt) > Math.min.apply(null, hgt);
@@ -798,6 +813,8 @@ var Engine = (function () {
     var lineup = [];
     for (i = 0; i < N; i++) if (curOn[i]) lineup.push(i);
     var lineups = [];
+    var noQuick = cfg.noQuickOff !== false, prevL = lineup.slice(), entered = [];
+    ids.forEach(function (x, ix) { if (fresh0 && fresh0[ix]) entered.push(ix); });
     function fresh(i) { return rat[i] * 1.0 - f[i] * 1.5; }
     for (k = 0; k < slots.length; k++) {
       var len = slots[k].len, dF = len / E;
@@ -811,7 +828,8 @@ var Engine = (function () {
       }
       // tired players go off, best rested bench player comes on
       var used = 0, lim = (lockRow && lockRow[k]) ? 0 : limits[k];
-      var tired = lineup.filter(function (x) { return f[x] + dF > 1.0001; })
+      var hold = noQuick && !(lockRow && lockRow[k]) ? entered : [];
+      var tired = lineup.filter(function (x) { return f[x] + dF > 1.0001 && !(hold.indexOf(x) >= 0 && !startFlags[k] && f[x] + dF < 1.2); })
         .sort(function (x, y) { return f[y] - f[x]; });
       tired.forEach(function (x) {
         if (used >= lim) return;
@@ -833,11 +851,14 @@ var Engine = (function () {
         if (used >= lim) return;
         var worst = null;
         lineup.forEach(function (x) {
+          if (hold.indexOf(x) >= 0) return;
           if (rat[x] < rat[y] && (worst === null || rat[x] < rat[worst] || (rat[x] === rat[worst] && f[x] > f[worst]))) worst = x;
         });
         if (worst !== null) { lineup[lineup.indexOf(worst)] = y; used++; }
       });
       lineups.push(lineup.map(function (x) { return ids[x]; }));
+      entered = lineup.filter(function (x) { return prevL.indexOf(x) < 0; });
+      prevL = lineup.slice();
       for (i = 0; i < N; i++) {
         if (inL(i)) f[i] = Math.min(1.5, f[i] + dF);
         else f[i] = Math.max(0, f[i] - dF * RECOVERY);
@@ -869,7 +890,7 @@ var Engine = (function () {
   }
 
   return {
-    derive: derive, plan: plan, sitHistory: sitHistory, seasonOwe: seasonOwe, rankBench: rankBench,
+    derive: derive, plan: plan, sitHistory: sitHistory, heightTarget: heightTarget, mean: mean, seasonOwe: seasonOwe, rankBench: rankBench,
     periodStart: periodStart, totalLen: totalLen, breakCredit: breakCredit, periodName: periodName,
     buildSlots: buildSlots
   };
@@ -882,7 +903,7 @@ var Engine = (function () {
   'use strict';
   var $ = function (s) { return document.querySelector(s); };
   var KEY = 'sub-planner-v1';
-  var DEF_CFG = { format: 'quarters', periods: 4, periodMin: 10, otMin: 3, onCourt: 5, subsPer: 2, subsMin: 1, subsMax: 3, usualSwap: 2, maxSwap: 3, foulLimit: 5, stintMin: 7, fairness: 'gentle', balance: true, balanceHeight: true, periodRule: 'every' };
+  var DEF_CFG = { format: 'quarters', periods: 4, periodMin: 10, otMin: 3, onCourt: 5, subsPer: 2, subsMin: 1, subsMax: 3, usualSwap: 2, maxSwap: 3, foulLimit: 5, stintMin: 7, fairness: 'gentle', balance: true, balanceHeight: true, periodRule: 'every', noQuickOff: true };
   var NUMERIC = { periods: 1, periodMin: 1, otMin: 1, onCourt: 1, subsPer: 1, subsMin: 1, subsMax: 1, usualSwap: 1, maxSwap: 1, foulLimit: 1, stintMin: 1 };
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -917,6 +938,7 @@ var Engine = (function () {
     if (cfg.subsMax == null) cfg.subsMax = cfg.subsPer + 1;
     if (cfg.usualSwap == null) cfg.usualSwap = Math.min(2, cfg.maxSwap);
     if (cfg.periodRule == null) cfg.periodRule = 'every';
+    if (cfg.noQuickOff == null) cfg.noQuickOff = true;
     if (cfg.balanceHeight == null) cfg.balanceHeight = true;
     delete cfg.subEvery;
     return cfg;
@@ -983,6 +1005,25 @@ var Engine = (function () {
     return g;
   }
   function planOpts(extra) { return Object.assign({ rating: ratingMap(), height: heightMap(), owe: UI.owe, sitCount: UI.sits }, extra || {}); }
+  // When a starter drops out, pick the one bench player who fits best with the four already chosen.
+  // Same priorities as the planner: season fairness first, then the experience mix, who has started least, then the height mix.
+  function suggestStarter(g) {
+    var C = Math.min(g.cfg.onCourt, g.present.length), cands = g.present.filter(function (id) { return g.starters.indexOf(id) < 0; });
+    if (!cands.length || g.starters.length >= C) return null;
+    var rat = ratingMap(), hgt = heightMap(), M = Engine.mean(g.present.map(function (id) { return rat[id] || 3; }));
+    var useH = g.cfg.balanceHeight !== false, useB = g.cfg.balance !== false;
+    var hTarget = Engine.heightTarget(g.present.map(function (id) { return hgt[id] || 3; }), C);
+    var best = null;
+    cands.forEach(function (id) {
+      var lineup = g.starters.concat(id), n = lineup.length, c = 0;
+      if (useB) { var d = lineup.reduce(function (a, x) { return a + (rat[x] || 3); }, 0) / n - M; c += 5 * d * d; }
+      c += 2.5 * ((UI.startRate && UI.startRate[id]) || 0);
+      if (useH) { var hs = lineup.reduce(function (a, x) { return a + (hgt[x] || 3); }, 0) * (C / n) - hTarget; c += 0.08 * hs * hs; }
+      c -= ((UI.owe && UI.owe[id]) || 0) / 600;
+      if (!best || c < best.c) best = { id: id, c: c };
+    });
+    return best.id;
+  }
   function autoStarters(g) {
     var C = Math.min(g.cfg.onCourt, g.present.length);
     if (!g.present.length) { g.starters = []; return; }
@@ -1329,7 +1370,9 @@ var Engine = (function () {
       oneSit: 'One player at a time may sit out a whole ' + per + ', and they must start the next one. Nobody sits twice in a game. Sit-outs are counted over the season and the players with the fewest are chosen first.',
       none: 'No rules. Players can sit out several quarters in a row if that is what equal time needs.' };
     return '<div class="field"><label>Court time in each ' + per + '</label>' + seg(scope, 'periodRule', cfg.periodRule, [['every', 'Everyone plays'], ['oneSit', 'One may sit out'], ['none', 'No rules']]) +
-      '<span class="small muted">' + text[cfg.periodRule] + '</span></div>';
+      '<span class="small muted">' + text[cfg.periodRule] + '</span></div>' +
+      '<div class="field"><label>Keep new players on for the next sub</label>' + seg(scope, 'noQuickOff', cfg.noQuickOff, [['true', 'On'], ['false', 'Off']]) +
+      '<span class="small muted">Someone who has just come on, including after an injury, is not the next one taken off. At a quarter or half it is only a strong preference, used if there is no other way to keep things fair.</span></div>';
   }
   function cfgForm(scope, cfg) {
     var pm = cfg.format === 'halves' ? [10, 12, 15, 16, 18, 20, 22, 25, 30] : [4, 5, 6, 7, 8, 9, 10, 12, 15];
@@ -1372,6 +1415,14 @@ var Engine = (function () {
     return h + '</div>';
   }
 
+  function vacancyCard(g, C) {
+    var sid = suggestStarter(g); if (!sid) return '';
+    var p = pl(sid), left = C - g.starters.length;
+    return '<div class="banner next"><div class="bh"><span>' + g.starters.length + ' of ' + C + ' starters picked</span></div>' +
+      '<div class="bl"><em>ADD</em><span>#' + esc(p.num) + ' ' + esc(p.name) + '</span></div>' +
+      '<div class="bb"><button class="btn solid grow" data-act="fillstart" data-id="' + sid + '">Use ' + esc(p.name) + (left > 1 ? ' (' + left + ' spots to fill)' : '') + '</button></div>' +
+      '<div class="small muted">Suggested to go with the starters you have, based on experience, height and who has started least. Or tap Start next to someone else.</div></div>';
+  }
   function setupView(g) {
     var C = Math.min(g.cfg.onCourt, g.present.length);
     var h = '<div class="appbar"><div><h1>Game setup</h1><span class="sub">' + esc(team().name) + '</span></div><button class="btn small danger" data-act="discard">Discard</button></div><div class="stack">';
@@ -1382,7 +1433,7 @@ var Engine = (function () {
       '<button class="' + (g.mode === 'best' ? 'on' : '') + '" data-act="mode" data-v="best">Best five</button></div>' +
       '<span class="small muted">' + (g.mode === 'equal' ? 'Everyone gets a fair share of the game, adjusted for the season so far.' : 'Your most experienced players stay on. Subs only when someone is tired, hurt or in foul trouble.') + '</span></div></div>';
 
-    h += '<div class="sec-title"><span>Who is here</span><span>' + g.present.length + ' playing · ' + g.starters.length + '/' + C + ' starters</span></div><div class="card flat" style="padding-block:4px">' + ratingLegend();
+    h += '<div class="sec-title"><span>Who is here</span><span>' + g.present.length + ' playing · ' + g.starters.length + '/' + C + ' starters</span></div>' + vacancyCard(g, C) + '<div class="card flat" style="padding-block:4px">' + ratingLegend();
     players().filter(function (p) { return !p.archived; }).forEach(function (p) {
       var isP = g.present.indexOf(p.id) >= 0, isS = g.starters.indexOf(p.id) >= 0;
       var o = UI.owe[p.id] || 0, sc = UI.starts && UI.starts[p.id] != null ? UI.starts[p.id] : 0;
@@ -2254,6 +2305,12 @@ var Engine = (function () {
       save(); render();
     },
     start: function () { startGame(activeGame()); },
+    fillstart: function (d) {
+      var g = activeGame(); if (!g || g.status !== 'setup') return;
+      var C = Math.min(g.cfg.onCourt, g.present.length);
+      if (g.starters.indexOf(d.id) < 0 && g.starters.length < C) g.starters.push(d.id);
+      save(); render();
+    },
     autostart: function () { var g = activeGame(); autoStarters(g); save(); render(); },
     pstate: function (d) {
       var g = activeGame(), id = d.id, C = Math.min(g.cfg.onCourt, g.present.length);
@@ -2279,7 +2336,7 @@ var Engine = (function () {
     },
     cfg: function (d) {
       var g = (d.scope === 'game' || d.scope === 'live') ? activeGame() : null, cfg = g ? g.cfg : team().cfg, v = d.v;
-      if (d.k === 'balance' || d.k === 'balanceHeight') v = v === 'true'; else if (NUMERIC[d.k]) v = Number(v);
+      if (d.k === 'balance' || d.k === 'balanceHeight' || d.k === 'noQuickOff') v = v === 'true'; else if (NUMERIC[d.k]) v = Number(v);
       if (d.k === 'format') {
         cfg.format = v; cfg.periods = v === 'halves' ? 2 : 4; cfg.periodMin = v === 'halves' ? 20 : 10;
         cfg.subsPer = v === 'halves' ? 3 : 2; cfg.subsMin = cfg.subsPer - 1; cfg.subsMax = cfg.subsPer + 1;
