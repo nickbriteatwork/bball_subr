@@ -284,6 +284,22 @@ table.g td.nm small { display: block; font-weight: 500; font-size: 11px; color: 
 .dc-blue { background: var(--d-blue); } .dc-pink { background: var(--d-pink); } .dc-green { background: var(--d-green); } .dc-ink { background: var(--ink); }
 .drawtools .btn.small { min-height: 38px; }
 
+textarea.notes { min-height: 84px; font-family: var(--body); font-size: 16px; line-height: 1.35; resize: none; }
+
+/* editing a finished game */
+table.g.ed { border-spacing: 0; }
+table.g.ed td, table.g.ed th { height: auto; padding: 3px 2px; }
+table.g.ed td.nm { padding: 3px 4px; max-width: 128px; min-width: 112px; }
+table.g.ed td.tot { text-align: center; font-family: var(--head); font-weight: 600; font-size: 16px; }
+.edn { width: 100%; text-align: left; border: 0; background: transparent; padding: 4px; border-radius: 8px; font-weight: 600; font-size: 14px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edn small { display: block; font-weight: 500; font-size: 11px; color: var(--ink2); }
+.edn.chg, .edc.chg { box-shadow: inset 0 0 0 2px var(--accent); }
+.edc { width: 100%; min-width: 52px; min-height: 48px; border: 0; border-radius: 8px; background: var(--surface2); font-family: var(--head); font-weight: 600; font-size: 18px; line-height: 1.05; padding: 2px; }
+.edc small { display: block; font-family: var(--body); font-weight: 500; font-size: 10px; color: var(--ink2); }
+.edc.off { color: var(--ink2); background: var(--bad-soft); }
+.edc-off { text-align: center; color: var(--ink2); }
+tr.edrow-off .edn { opacity: .55; }
+
 body{padding-top:calc(12px + env(safe-area-inset-top,0px))}
 [hidden]{display:none!important}</style>
 </head><body><div id="app"></div><div id="toast"></div><nav id="tabs" class="tabs" aria-label="Sections"></nav><div id="sheet"></div>
@@ -1844,13 +1860,124 @@ var Engine = (function () {
       '<button class="btn primary wide" data-act="savep" data-id="' + (id || '') + '">Save</button>' +
       (id ? '<button class="btn danger wide" data-act="removep" data-id="' + id + '">Remove from roster</button>' : ''));
   }
+
+  /* ---- editing a finished game ---- */
+  // A game record is a log of subs, injuries and fouls. The editor works in minutes per player per quarter,
+  // then rebuilds a clean log with the same totals. Season minutes, owed time, sit-outs and starts all recompute from it.
+  function gameById(id) { return DB.games.filter(function (x) { return x.id === id; })[0]; }
+  function editPeriods(g) {
+    var out = [], ps = 0;
+    for (var j = 0; j < g.lens.length; j++) {
+      if (ps >= g.finalTau - 0.5) break;
+      out.push({ per: j, ps: ps, L: Math.min(g.lens[j], g.finalTau - ps) });
+      ps += g.lens[j];
+    }
+    return out;
+  }
+  function parseT(str, max) {
+    str = String(str || '').trim(); if (!str) return null;
+    var v;
+    if (str.indexOf(':') >= 0) { var a = str.split(':'); v = (parseFloat(a[0]) || 0) * 60 + (parseFloat(a[1]) || 0); }
+    else v = parseFloat(str.replace(',', '.')) * 60;
+    if (isNaN(v)) return null;
+    return Math.max(0, Math.min(max, v));
+  }
+  function buildDraft(g) {
+    var per = editPeriods(g), P = Engine.derive(g, g.finalTau).P, snaps = per.map(function (pp) { return Engine.derive(g, pp.ps).P; });
+    var last = per[per.length - 1]; snaps.push(Engine.derive(g, last.ps + last.L).P);
+    var ids = Object.keys(P);
+    players().forEach(function (p) { if (!p.archived && ids.indexOf(p.id) < 0) ids.push(p.id); });
+    ids.sort(function (a, b) { return (parseInt(pl(a).num, 10) || 0) - (parseInt(pl(b).num, 10) || 0); });
+    var rows = {};
+    ids.forEach(function (id) {
+      var here = !!P[id];
+      rows[id] = { present: here, started: (g.starters || []).indexOf(id) >= 0, fouls: here ? P[id].fouls : 0, per: per.map(function (pp, j) {
+        if (!here) return { m: 0, a: pp.L };
+        var s0 = snaps[j][id], s1 = snaps[j + 1][id];
+        var m = s1 ? s1.played - (s0 ? s0.played : 0) : 0, a = s1 ? s1.avail - (s0 ? s0.avail : 0) : 0;
+        return { m: Math.max(0, Math.round(m * 100) / 100), a: Math.max(0, Math.round(a * 100) / 100) };
+      }) };
+    });
+    return { gid: g.id, ids: ids, rows: rows, orig: JSON.parse(JSON.stringify(rows)), scroll: 0 };
+  }
+  function applyDraft(g, d) {
+    var per = editPeriods(g);
+    if (!g.orig) g.orig = JSON.parse(JSON.stringify({ events: g.events, present: g.present, starters: g.starters }));
+    var foulEv = g.events.filter(function (e) { return e.type === 'foul'; }), evs = g.events.filter(function (e) { return e.type === 'brk'; });
+    var present = [], starters = [];
+    d.ids.forEach(function (id) {
+      var r = d.rows[id]; if (!r.present) return;
+      present.push(id); if (r.started) starters.push(id);
+      var mine = foulEv.filter(function (e) { return e.p === id; }).slice(0, r.fouls);
+      for (var k = mine.length; k < r.fouls; k++) mine.push({ t: Math.max(0, g.finalTau - 1), type: 'foul', p: id, per: per[per.length - 1].per, grp: 'edit' });
+      evs = evs.concat(mine);
+      var wasOut = false;
+      per.forEach(function (pp, j) {
+        var c = r.per[j], a = Math.max(0, Math.min(pp.L, c.a)), m = Math.max(0, Math.min(a, c.m));
+        function ev(t, type) { evs.push({ t: t, type: type, p: id, per: pp.per, grp: 'edit' }); }
+        if (a > 0 && wasOut) ev(pp.ps, 'avail');
+        if (a === 0 && !wasOut) ev(pp.ps, 'inj');
+        if (m > 0) { ev(pp.ps, 'in'); ev(pp.ps + m, 'out'); }
+        if (a > 0 && a < pp.L) ev(pp.ps + a, 'inj');
+        wasOut = a < pp.L;
+      });
+    });
+    g.events = evs; g.present = present; g.starters = starters; g.edited = true;
+  }
+  function openEdit(gid) {
+    var g = gameById(gid); if (!g || g.status !== 'done') return;
+    UI.ed = buildDraft(g); paintEdit(false);
+  }
+  function paintEdit(keepScroll) {
+    var d = UI.ed, g = gameById(d.gid), per = editPeriods(g), el = document.querySelector('.sheet'), y = keepScroll ? d.scroll : 0;
+    var h = '<h2>Edit game record</h2><div class="muted">' + esc(g.opp ? 'vs ' + g.opp : 'Game') + ' · ' + esc(g.date) + '. Tap a quarter to fix a player\'s minutes. Tap a name to change who started, their fouls, or whether they were at the game. Changes are outlined in orange and only count when you tap Save.</div>';
+    h += '<div class="gridwrap"><table class="g ed"><thead><tr><th class="nm">Player</th>' + per.map(function (pp) { return '<th>' + Engine.periodName(g.cfg, pp.per) + '</th>'; }).join('') + '<th>Total</th></tr></thead><tbody>';
+    d.ids.forEach(function (id) {
+      var r = d.rows[id], p = pl(id), o = d.orig[id], tot = 0, rowChg = r.present !== o.present || r.started !== o.started || r.fouls !== o.fouls;
+      var cells = per.map(function (pp, j) {
+        var c = r.per[j], oc = o.per[j]; if (r.present) tot += Math.min(c.m, c.a);
+        var chg = r.present && o.present && (Math.abs(c.m - oc.m) > 0.5 || Math.abs(c.a - oc.a) > 0.5);
+        if (!r.present) return '<td class="edc-off">–</td>';
+        var main = c.a < 0.5 ? 'out' : fmt(Math.min(c.m, c.a)), sub = c.a >= 0.5 && c.a < pp.L - 0.5 ? '<small>there ' + fmt(c.a) + '</small>' : '';
+        return '<td><button class="edc' + (chg || (!o.present) ? ' chg' : '') + (c.a < 0.5 ? ' off' : '') + '" data-act="edcell" data-id="' + id + '" data-j="' + j + '">' + main + sub + '</button></td>';
+      }).join('');
+      h += '<tr' + (r.present ? '' : ' class="edrow-off"') + '><td class="nm"><button class="edn' + (rowChg ? ' chg' : '') + '" data-act="edplayer" data-id="' + id + '">#' + esc(p.num) + ' ' + esc(p.name) + '<small>' + (r.present ? (r.started ? 'Started · ' : '') + r.fouls + (r.fouls === 1 ? ' foul' : ' fouls') : 'Not at this game') + '</small></button></td>' + cells + '<td class="tot">' + (r.present ? fmt(tot) : '') + '</td></tr>';
+    });
+    h += '</tbody></table></div><button class="btn primary wide" data-act="edsave">Save changes</button>' +
+      (g.orig ? '<button class="btn wide" data-act="edrestore">Restore the original record</button>' : '') +
+      '<button class="btn wide" data-act="closesheet">Cancel</button>';
+    openSheet(h);
+    el = document.querySelector('.sheet'); if (el) el.scrollTop = y;
+  }
+  function paintEditCell(id, j) {
+    var d = UI.ed, g = gameById(d.gid), pp = editPeriods(g)[j], c = d.rows[id].per[j], p = pl(id);
+    var h = '<h2><span>#' + esc(p.num) + '</span> ' + esc(p.name) + ' · ' + Engine.periodName(g.cfg, pp.per) + '</h2><div class="muted">This ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' was ' + fmt(pp.L) + ' long.</div>' +
+      '<div class="stack" style="gap:8px"><button class="btn wide" data-act="edq" data-id="' + id + '" data-j="' + j + '" data-k="full">Played the whole ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + '</button>' +
+      '<button class="btn wide" data-act="edq" data-id="' + id + '" data-j="' + j + '" data-k="bench">Was there but did not play</button>' +
+      '<button class="btn wide" data-act="edq" data-id="' + id + '" data-j="' + j + '" data-k="away">Was not there (injured, left, or absent)</button></div>' +
+      '<div class="lbl">Or enter the times</div><div class="grid2"><div class="field"><label for="ed-played">Minutes played</label><input type="text" id="ed-played" inputmode="text" autocomplete="off" value="' + fmt(Math.min(c.m, c.a)) + '"></div>' +
+      '<div class="field"><label for="ed-avail">Time there</label><input type="text" id="ed-avail" inputmode="text" autocomplete="off" value="' + fmt(c.a) + '"></div></div>' +
+      '<span class="small muted">Type minutes and seconds like 4:30, or just minutes like 4.5. Time there is the part of the ' + (g.cfg.format === 'halves' ? 'half' : 'quarter') + ' the player could have played. It is only shorter than the full time if they were hurt, left early or arrived late.</span>' +
+      '<button class="btn primary wide" data-act="edcdone" data-id="' + id + '" data-j="' + j + '">Done</button><button class="btn wide" data-act="edback">Back</button>';
+    openSheet(h);
+  }
+  function paintEditPlayer(id) {
+    var d = UI.ed, r = d.rows[id], p = pl(id);
+    function seg2(k, v) { return '<div class="seg"><button class="' + (v ? 'on' : '') + '" data-act="edtog" data-id="' + id + '" data-k="' + k + '" data-v="1">Yes</button><button class="' + (!v ? 'on' : '') + '" data-act="edtog" data-id="' + id + '" data-k="' + k + '" data-v="0">No</button></div>'; }
+    var h = '<h2><span>#' + esc(p.num) + '</span> ' + esc(p.name) + '</h2>' +
+      '<div class="field"><label>At this game</label>' + seg2('present', r.present) + '</div>' +
+      (r.present ? '<div class="field"><label>Started</label>' + seg2('started', r.started) + '</div>' +
+        '<div class="field"><label>Fouls</label><div class="row-flex"><button class="btn" data-act="edfoul" data-id="' + id + '" data-v="-1">−</button><div class="grow" style="text-align:center;font-family:var(--head);font-size:32px;font-weight:700">' + r.fouls + '</div><button class="btn" data-act="edfoul" data-id="' + id + '" data-v="1">+</button></div></div>' : '') +
+      '<button class="btn primary wide" data-act="edback">Done</button>';
+    openSheet(h);
+  }
   function openBox(gid) {
     var g = DB.games.filter(function (x) { return x.id === gid; })[0]; if (!g) return;
     var P = Engine.derive(g, g.finalTau).P, ids = Object.keys(P).sort(function (a, b) { return P[b].played - P[a].played; });
     var vals = ids.map(function (i) { return P[i].played; });
     openSheet('<h2>' + esc(g.opp ? 'vs ' + g.opp : 'Game') + '</h2><div class="muted">' + esc(g.date) + ' · ' + (g.mode === 'best' ? 'ended in Best five' : 'ended in Equal time') + '</div><div class="card flat" style="padding-block:4px">' +
       ids.map(function (i) { var p = pl(i); return '<div class="srow" style="grid-template-columns:34px 1fr auto"><span class="num">' + esc(p.num) + '</span><b>' + esc(p.name) + '</b><span class="r">' + fmt(P[i].played) + '<small class="muted">' + P[i].fouls + ' fouls' + (P[i].status === 'out' ? ' · injured' : P[i].status === 'fo' ? ' · fouled out' : '') + '</small></span></div>'; }).join('') +
-      '</div><button class="btn wide" data-act="awards" data-id="' + gid + '">' + (awardsSet(g) ? 'Edit awards' : 'Set awards') + '</button><button class="btn danger wide" data-act="delgame" data-id="' + gid + '">Delete this game</button>');
+      '</div><button class="btn primary wide" data-act="edgame" data-id="' + gid + '">Edit this game record</button><button class="btn wide" data-act="awards" data-id="' + gid + '">' + (awardsSet(g) ? 'Edit awards' : 'Set awards') + '</button><button class="btn danger wide" data-act="delgame" data-id="' + gid + '">Delete this game</button>');
   }
   function openSeasonPlayer(id) {
     var ss = seasonStats(), s = ss.S[id], p = pl(id);
@@ -1900,6 +2027,13 @@ var Engine = (function () {
     box.innerHTML = '<b>This backup has:</b> ' + countsOf(d) + '.' + (empty ? '<br>It has no players, so it is probably from the empty copy of the app. Copy it from the device that has your team.' : '') + here;
   }
   document.addEventListener('input', function (e) { if (e.target && e.target.id === 'bk-in') updateBackupSummary(); });
+  var notesTimer = null;
+  document.addEventListener('input', function (e) {
+    if (!e.target || e.target.id !== 'court-notes') return;
+    var g = activeGame(); if (!g) return;
+    g.notes = e.target.value;
+    clearTimeout(notesTimer); notesTimer = setTimeout(save, 400);
+  });
   function openBackup() {
     var json = JSON.stringify(DB, function (k, v) { return k === '_plan' ? undefined : v; });
     openSheet('<h2>Back up</h2><div class="muted">Copy this text and keep it somewhere safe, such as Notes. To restore, paste it back below.</div>' +
@@ -1973,7 +2107,7 @@ var Engine = (function () {
     if (!g.form) g.form = defaultForm(lineup);
     syncForm(g.form, lineup);
     if (JSON.stringify(g.form) !== before) save();
-    var out = h + '<div class="stack"><div class="card small muted">Your end is the bottom half. Drag players anywhere on the court, and up into the top half to show a press. A substitute takes the spot of the player they replace. Tap Draw to sketch plays with your finger.' + (UI.drawOn ? ' Players are locked while you draw.' : '') + '</div>';
+    var out = h + '<div class="stack"><div class="field"><label for="court-notes">Notes</label><textarea id="court-notes" class="notes" rows="3" maxlength="400" placeholder="Notes for this game, such as the press or who to watch">' + esc(g.notes || '') + '</textarea></div><div class="card small muted">Your end is the bottom half. Drag players anywhere on the court, and up into the top half to show a press. A substitute takes the spot of the player they replace. Tap Draw to sketch plays with your finger.' + (UI.drawOn ? ' Players are locked while you draw.' : '') + '</div>';
     out += '<div class="court' + (UI.drawOn ? ' drawing' : '') + '" id="court">' + courtPaint();
     Object.keys(g.form.pos).forEach(function (id) {
       var p = pl(id), c = g.form.pos[id];
@@ -2246,6 +2380,40 @@ var Engine = (function () {
       save(); closeSheet(); render();
     },
     box: function (d) { openBox(d.id); },
+    edgame: function (d) { closeSheet(); openEdit(d.id); },
+    edcell: function (d) { var el = document.querySelector('.sheet'); if (el) UI.ed.scroll = el.scrollTop; UI.edPer = Number(d.j); paintEditCell(d.id, Number(d.j)); },
+    edplayer: function (d) { var el = document.querySelector('.sheet'); if (el) UI.ed.scroll = el.scrollTop; paintEditPlayer(d.id); },
+    edback: function () { paintEdit(true); },
+    edq: function (d) {
+      var g = gameById(UI.ed.gid), pp = editPeriods(g)[Number(d.j)], c = UI.ed.rows[d.id].per[Number(d.j)];
+      if (d.k === 'full') { c.m = pp.L; c.a = pp.L; } else if (d.k === 'bench') { c.m = 0; c.a = pp.L; } else { c.m = 0; c.a = 0; }
+      paintEdit(true);
+    },
+    edcdone: function (d) {
+      var g = gameById(UI.ed.gid), pp = editPeriods(g)[Number(d.j)], c = UI.ed.rows[d.id].per[Number(d.j)];
+      var a = parseT($('#ed-avail').value, pp.L), m = parseT($('#ed-played').value, pp.L);
+      if (a == null || m == null) { showToast('Enter times like 4:30 or 4.5'); return; }
+      if (m > a) { if ($('#ed-avail').value.trim() === fmt(c.a)) a = m; else m = a; }
+      c.a = a; c.m = m; paintEdit(true);
+    },
+    edtog: function (d) {
+      var r = UI.ed.rows[d.id], v = d.v === '1';
+      if (d.k === 'present') { r.present = v; if (!v) r.started = false; }
+      else r.started = v;
+      paintEditPlayer(d.id);
+    },
+    edfoul: function (d) { var r = UI.ed.rows[d.id]; r.fouls = Math.max(0, r.fouls + Number(d.v)); paintEditPlayer(d.id); },
+    edsave: function () {
+      var g = gameById(UI.ed.gid), d = UI.ed;
+      if (!d.ids.some(function (id) { return d.rows[id].present; })) { showToast('At least one player must have been at the game'); return; }
+      applyDraft(g, d); recomputeOwe(); save(); closeSheet(); render(); showToast('Game record updated');
+    },
+    edrestore: function () { confirmSheet('Restore the original record?', 'Your edits to this game are thrown away and the record goes back to how it was when the game ended.', 'edrestore2', '', 'Restore original'); },
+    edrestore2: function () {
+      var g = gameById(UI.ed.gid); if (!g || !g.orig) return;
+      g.events = g.orig.events; g.present = g.orig.present; g.starters = g.orig.starters; delete g.orig; delete g.edited;
+      recomputeOwe(); save(); closeSheet(); render(); showToast('Original record restored');
+    },
     stab: function (d) { UI.stab = d.v; render(); },
     drawon: function () { UI.drawOn = true; if (!UI.drawColor) UI.drawColor = 'blue'; render(); },
     drawoff: function () { UI.drawOn = false; render(); },
